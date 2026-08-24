@@ -59,7 +59,7 @@ func (h *LoginHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Body already bounded and parsed by parseBoundedPostForm above.
-	token := r.PostFormValue("token") //nolint:gosec // G120: body size limit applied via parseBoundedPostForm
+	token := r.PostFormValue("token")
 	if token == "" || !middleware.ValidateToken([]byte(token), h.validTokens) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)

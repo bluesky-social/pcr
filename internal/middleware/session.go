@@ -40,7 +40,7 @@ func SetSessionCookie(w http.ResponseWriter, opts SessionOptions) {
 	sig := signSession(opts.Secret, nonceHex, timestamp)
 	value := nonceHex + ":" + timestamp + ":" + sig
 
-	http.SetCookie(w, &http.Cookie{
+	cookie := &http.Cookie{ //nolint:gosec // G124: Secure is deliberately configurable for documented local HTTP development.
 		Name:     SessionCookieName,
 		Value:    value,
 		Path:     "/",
@@ -49,7 +49,8 @@ func SetSessionCookie(w http.ResponseWriter, opts SessionOptions) {
 		Secure:   opts.Secure,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(24 * time.Hour),
-	})
+	}
+	http.SetCookie(w, cookie)
 }
 
 // ValidateSessionCookie checks if the request has a valid, non-expired session cookie.
@@ -107,14 +108,20 @@ func ValidateCSRFToken(secret []byte, nonce, token string) bool {
 	return hmac.Equal([]byte(token), []byte(expected))
 }
 
-// ClearSessionCookie removes the session cookie.
-func ClearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:   SessionCookieName,
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
+// ClearSessionCookie removes the session cookie. secure must match the setting
+// used when the original cookie was created.
+func ClearSessionCookie(w http.ResponseWriter, secure bool) {
+	cookie := &http.Cookie{ //nolint:gosec // G124: Secure must match the potentially HTTP-only cookie being removed.
+		Name:     SessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Unix(1, 0),
+	}
+	http.SetCookie(w, cookie)
 }
 
 // signSession computes HMAC-SHA256 over the concatenated parts.

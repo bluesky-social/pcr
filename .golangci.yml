@@ -2,7 +2,7 @@ version: "2"
 
 run:
   timeout: 2m
-  go: "1.25"
+  go: "1.27"
 
 linters:
   # `standard` enables errcheck, govet, ineffassign, staticcheck, unused.

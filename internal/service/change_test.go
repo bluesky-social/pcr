@@ -63,8 +63,6 @@ func (m *mockStore) Close() error { return nil }
 // helpers
 // ---------------------------------------------------------------------------
 
-func timePtr(t time.Time) *time.Time { return &t }
-
 // ---------------------------------------------------------------------------
 // Create tests
 // ---------------------------------------------------------------------------
@@ -272,7 +270,7 @@ func TestCreate(t *testing.T) {
 		got, err := svc.Create(context.Background(), &model.CreateChangeRequest{
 			UserName:  "bob",
 			EventType: model.EventTypeFeatureFlag,
-			Timestamp: timePtr(explicit),
+			Timestamp: new(explicit),
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -363,8 +361,8 @@ func TestList(t *testing.T) {
 		now := time.Now().UTC()
 		tags := map[string]string{"team": "infra"}
 		input := model.ListParams{
-			StartAfter:  timePtr(now.Add(-1 * time.Hour)),
-			StartBefore: timePtr(now),
+			StartAfter:  new(now.Add(-1 * time.Hour)),
+			StartBefore: new(now),
 			UserName:    "alice",
 			EventType:   model.EventTypeDeployment,
 			Tags:        tags,

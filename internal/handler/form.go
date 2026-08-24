@@ -19,8 +19,7 @@ const maxFormBytes = 8 << 10
 func parseBoundedPostForm(w http.ResponseWriter, r *http.Request) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := r.ParseForm(); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 			return false
 		}

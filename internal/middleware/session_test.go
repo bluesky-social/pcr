@@ -140,7 +140,13 @@ func TestValidateSessionCookie(t *testing.T) {
 		t.Parallel()
 
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "deadbeef"})
+		req.AddCookie(&http.Cookie{
+			Name:     middleware.SessionCookieName,
+			Value:    "deadbeef",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
 
 		if middleware.ValidateSessionCookie(req, secret) {
 			t.Error("expected ValidateSessionCookie to return false for tampered cookie")
@@ -151,7 +157,10 @@ func TestValidateSessionCookie(t *testing.T) {
 		t.Parallel()
 
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
-		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "onlyonepart"})
+		req.AddCookie(&http.Cookie{ //nolint:gosec // G124: inbound malformed-cookie fixture has no response security attributes.
+			Name:  middleware.SessionCookieName,
+			Value: "onlyonepart",
+		})
 
 		if middleware.ValidateSessionCookie(req, secret) {
 			t.Error("expected false for cookie with no colons")
@@ -248,7 +257,7 @@ func TestClearSessionCookie(t *testing.T) {
 	t.Parallel()
 
 	rec := httptest.NewRecorder()
-	middleware.ClearSessionCookie(rec)
+	middleware.ClearSessionCookie(rec, true)
 
 	found := findCookie(t, rec, middleware.SessionCookieName)
 	if found.MaxAge != -1 {
@@ -256,6 +265,9 @@ func TestClearSessionCookie(t *testing.T) {
 	}
 	if found.Value != "" {
 		t.Errorf("Value = %q, want empty string", found.Value)
+	}
+	if !found.HttpOnly || !found.Secure || found.SameSite != http.SameSiteLaxMode {
+		t.Errorf("deletion cookie has insecure attributes: %+v", found)
 	}
 }
 

@@ -224,7 +224,13 @@ func TestAuthSessionCookie(t *testing.T) {
 		srv := mw(okHandler)
 
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", nil)
-		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "invalid-value"})
+		req.AddCookie(&http.Cookie{
+			Name:     middleware.SessionCookieName,
+			Value:    "invalid-value",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 

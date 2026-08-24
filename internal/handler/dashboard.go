@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -248,7 +249,7 @@ func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 	// Validate CSRF token from form submission. Body already bounded and
 	// parsed by parseBoundedPostForm above.
 	nonce := middleware.SessionNonce(r)
-	csrfToken := r.PostFormValue("csrf_token") //nolint:gosec // G120: body size limit applied via parseBoundedPostForm
+	csrfToken := r.PostFormValue("csrf_token")
 	if !middleware.ValidateCSRFToken(h.sessionSecret, nonce, csrfToken) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
@@ -267,17 +268,20 @@ func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirect := "/"
-	if referer := r.Header.Get("Referer"); referer != "" {
-		// security: only use the path to prevent open redirects to external hosts.
-		if u, err := url.Parse(referer); err == nil && u.Path != "" {
-			redirect = u.Path
-			if u.RawQuery != "" {
-				redirect += "?" + u.RawQuery
-			}
-		}
+	// localRedirectTarget rejects scheme-relative and backslash-based paths,
+	// including percent-encoded variants after url.Parse decodes them.
+	redirect := localRedirectTarget(r.Header.Get("Referer"))
+	http.Redirect(w, r, redirect, http.StatusSeeOther) //nolint:gosec // G710: target is reduced to a validated local request URI above.
+}
+
+func localRedirectTarget(referer string) string {
+	u, err := url.Parse(referer)
+	if err != nil || u.Path == "" || !strings.HasPrefix(u.Path, "/") ||
+		strings.HasPrefix(u.Path, "//") || strings.Contains(u.Path, "\\") {
+		return "/"
 	}
-	http.Redirect(w, r, redirect, http.StatusSeeOther)
+
+	return (&url.URL{Path: u.Path, RawQuery: u.Query().Encode()}).RequestURI()
 }
 
 // paginationURL builds a URL preserving current query params but updating offset and limit.

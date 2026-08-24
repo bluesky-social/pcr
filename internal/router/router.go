@@ -22,7 +22,6 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Use(middleware.Logger())
 	r.Use(middleware.SecurityHeaders())
 	r.Use(chimiddleware.Recoverer)
-	r.Use(chimiddleware.RealIP)
 	r.Use(chimiddleware.Timeout(30 * time.Second))
 
 	// Static files and health check are served without authentication.

@@ -624,6 +624,37 @@ func TestDashboardToggleStar(t *testing.T) {
 		}
 	})
 
+	t.Run("ambiguous local paths do not cause open redirect", func(t *testing.T) {
+		t.Parallel()
+
+		tests := map[string]string{
+			"double slash":         "https://registry.example//evil.com/phish",
+			"encoded double slash": "https://registry.example/%2f%2fevil.com/phish",
+			"backslash":            "https://registry.example/\\evil.com/phish",
+		}
+		for name, referer := range tests {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				ds := newDashboardTestStack()
+				setupToggleStarMocks(ds)
+
+				req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events/evt-star-001/star", nil)
+				req.Header.Set("Referer", referer)
+				addCSRFToRequest(t, req)
+				rec := httptest.NewRecorder()
+				ds.router.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusSeeOther {
+					t.Fatalf("expected 303, got %d", rec.Code)
+				}
+				if loc := rec.Header().Get("Location"); loc != "/" {
+					t.Fatalf("expected safe root redirect, got %q", loc)
+				}
+			})
+		}
+	})
+
 	t.Run("no referer redirects to root", func(t *testing.T) {
 		t.Parallel()
 

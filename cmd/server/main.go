@@ -151,7 +151,6 @@ func runMigrations(db *sql.DB) error {
 		// embedded set of migration files. m.Force takes int (the API
 		// predates uint everywhere), so the conversion is safe in
 		// practice -- our migration count is tiny relative to MaxInt.
-		//nolint:gosec // G115: migrate.Version is bounded by the embedded migration file count; overflow is not reachable
 		if ferr := m.Force(int(version)); ferr != nil {
 			return ferr
 		}

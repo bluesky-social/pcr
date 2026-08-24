@@ -79,10 +79,6 @@ func mustTime(t *testing.T, value string) time.Time {
 	return ts
 }
 
-func timePtr(ts time.Time) *time.Time { return &ts }
-
-func durationPtr(d time.Duration) *time.Duration { return &d }
-
 func makeEvent(id, userName, eventType string, ts time.Time, tags map[string]string) *model.ChangeEvent {
 	return &model.ChangeEvent{
 		ID:              id,
@@ -514,19 +510,19 @@ func TestList(t *testing.T) {
 	}{
 		{
 			name:          "filter by StartAfter only",
-			params:        model.ListParams{StartAfter: timePtr(mustTime(t, "2026-01-03T00:00:00Z"))},
+			params:        model.ListParams{StartAfter: new(mustTime(t, "2026-01-03T00:00:00Z"))},
 			expectedCount: 3, // list-3, list-4, list-5
 		},
 		{
 			name:          "filter by StartBefore only",
-			params:        model.ListParams{StartBefore: timePtr(mustTime(t, "2026-01-03T00:00:00Z"))},
+			params:        model.ListParams{StartBefore: new(mustTime(t, "2026-01-03T00:00:00Z"))},
 			expectedCount: 2, // list-1, list-2
 		},
 		{
 			name: "filter by time range both",
 			params: model.ListParams{
-				StartAfter:  timePtr(mustTime(t, "2026-01-02T00:00:00Z")),
-				StartBefore: timePtr(mustTime(t, "2026-01-04T10:00:00Z")),
+				StartAfter:  new(mustTime(t, "2026-01-02T00:00:00Z")),
+				StartBefore: new(mustTime(t, "2026-01-04T10:00:00Z")),
 			},
 			expectedCount: 2, // list-2, list-3
 		},
@@ -701,8 +697,8 @@ func TestList(t *testing.T) {
 		// events within [2026-01-02T10:00:00Z, 2026-01-04T10:00:00Z).
 		around := mustTime(t, "2026-01-03T10:00:00Z")
 		res, err := s.List(ctx, model.ListParams{
-			Around: timePtr(around),
-			Window: durationPtr(24 * time.Hour),
+			Around: new(around),
+			Window: new(24 * time.Hour),
 		})
 		if err != nil {
 			t.Fatalf("List Around: %v", err)
