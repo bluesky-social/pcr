@@ -18,15 +18,17 @@ make docker-build
 ### Run the container
 
 ```bash
+export PCR_SESSION_SECRET="$(openssl rand -base64 48)"
 docker run -d --name pcr-server \
   -p 8080:8080 \
   -e PCR_API_TOKENS=my-secret-token \
-  -e PCR_SESSION_SECRET=replace-with-32-byte-secret-from-openssl-rand \
+  -e PCR_SESSION_SECRET \
+  -e PCR_COOKIE_SECURE=false \
   -v pcr-data:/data \
   pcr-server
 ```
 
-The `-v pcr-data:/data` creates a named volume so the SQLite database persists across container restarts.
+The `-v pcr-data:/data` creates a named volume so the SQLite database persists across container restarts. `PCR_COOKIE_SECURE=false` is appropriate only for this local HTTP example; deployments served over HTTPS should keep the default `true`.
 
 ### Sanity check
 
@@ -145,8 +147,10 @@ Before applying, edit `k8s/secret.yaml` with your actual values:
 ```yaml
 stringData:
   api-tokens: "your-actual-token"
-  session-secret: "your-actual-session-secret"
+  session-secret: "a-random-secret-of-at-least-32-bytes"
 ```
+
+The checked-in placeholders are not deployment credentials, and the placeholder session secret is too short for the server to accept. Replace both values before applying the manifests.
 
 ### Apply manifests
 
@@ -197,8 +201,9 @@ curl -s -X POST -H "Authorization: Bearer your-actual-token" \
 curl -s -H "Authorization: Bearer your-actual-token" \
   "http://localhost:8080/api/v1/events?top_level=true" | jq '.total_count'
 
-# Dashboard
-open "http://localhost:8080/login?token=your-actual-token"
+# Dashboard through the backwards-compatible query-token flow. This is suitable
+# only for local testing; prefer HTTPS and the /login form in a real deployment.
+open "http://localhost:8080/?token=your-actual-token"
 ```
 
 ### Tear down

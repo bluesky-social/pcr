@@ -1,12 +1,13 @@
 # go-prod-change-registry
 
-A lightweight, append-only change registry for production environments. It records deployments, feature-flag flips, infrastructure mutations, and other production changes as immutable events in a SQLite-backed store, then exposes them through a RESTful API and an HTML dashboard. Teams can use it to correlate production changes with incidents and understand what changed, when, and by whom.
+A lightweight, append-only change registry for production environments. It records deployments, feature-flag flips, infrastructure mutations, and other production changes as immutable events in a SQLite-backed store, then exposes them through a RESTful API and an HTML dashboard. Derived annotations identify events that are currently starred or have an active alert. Teams can use it to correlate production changes with incidents and understand what changed, when, and by whom.
 
 ## Quickstart
 
 ```bash
 make build
 export PCR_API_TOKENS="my-secret-token"
+export PCR_COOKIE_SECURE=false # local HTTP only
 ./bin/pcr-server
 ```
 
@@ -68,15 +69,15 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 
 | Parameter | Type | Description |
 |---|---|---|
-| `start_after` | RFC 3339 timestamp | Events with timestamp after this time |
-| `start_before` | RFC 3339 timestamp | Events with timestamp before this time |
-| `around` | RFC 3339 timestamp | Center of a time window (use with `window`) |
-| `window` | Go duration (e.g. `30m`) | Half-width of the time window around `around` |
+| `start_after` | RFC 3339 timestamp | Events with `timestamp >=` this time |
+| `start_before` | RFC 3339 timestamp | Events with `timestamp <` this time |
+| `around` | RFC 3339 timestamp | Center of a time window; takes precedence over start bounds |
+| `window` | Go duration (e.g. `30m`) | Half-width around `around`; defaults to `30m` when `around` is set |
 | `user` | string | Filter by user name |
 | `type` | string | Filter by event type (`deployment`, `feature-flag`, `k8s-change`, ...) |
-| `tag` | string | Filter by tag (`key:value`) |
+| `tag` | string | Filter by tag (`key:value`); repeat with different keys to require multiple tags |
 | `top_level` | bool | If `true`, exclude meta-events (only events without a `parent_id`) |
-| `alerted` | bool | If true, return only events with an active alert annotation |
+| `alerted` | bool | If exactly `true`, return events whose current derived alert state is active |
 | `limit` | int | Max results, 1-200 (default 50) |
 | `offset` | int | Pagination offset |
 
@@ -120,7 +121,7 @@ pcr "http://localhost:8080/api/v1/events?type=deployment&start_after=2026-03-30T
 pcr "http://localhost:8080/api/v1/events?around=2026-03-31T14:32:00Z&window=30m"
 ```
 
-This returns all events within 30 minutes of the given timestamp -- useful for answering "what changed around the time of an incident?"
+This returns events from 30 minutes before the given timestamp (inclusive) to 30 minutes after it (exclusive) -- useful for answering "what changed around the time of an incident?"
 
 **List top-level events only (exclude meta-events):**
 
@@ -154,9 +155,17 @@ pcr -X POST http://localhost:8080/api/v1/events/abc123/star
 
 This creates a `star` or `unstar` meta-event depending on the current state.
 
+**List every currently alerted event:**
+
+```bash
+pcr "http://localhost:8080/api/v1/events?alerted=true&top_level=true"
+```
+
+This API query has no implicit time bound. The dashboard's Alerts view does have the dashboard's default 24-hour event-time range unless a different range is selected.
+
 ## Meta-Events
 
-Status changes are not stored as mutable fields on an event. Instead, they are modeled as new, immutable meta-events that reference the original event via `parent_id`.
+Star and alert state are not stored as mutable fields on an event. Instead, each transition is a new, immutable meta-event that references the original event via `parent_id`.
 
 ### How it works
 
@@ -182,7 +191,9 @@ To unstar, another meta-event is created:
 }
 ```
 
-The current state is derived by looking at the most recent meta-event. The `GET /api/v1/events/{id}/annotations` endpoint returns the computed state.
+The current state is derived independently for each transition pair. Meta-events are considered in reverse creation order (`created_at`, then `id` as a tie-breaker): the newest `star` or `unstar` determines `starred`, and the newest `alert` or `clear-alert` determines `alerted`. An event with no transition in a pair has the corresponding state set to `false`. The meta-event's `timestamp` does not control reduction order.
+
+The `GET /api/v1/events/{id}/annotations` endpoint returns this computed state. `GET /api/v1/events?alerted=true` uses the same latest-transition rule to return events whose alert state is currently active.
 
 ### Meta-event types
 
@@ -190,12 +201,38 @@ The current state is derived by looking at the most recent meta-event. The `GET 
 |---|---|
 | `star` | Marks the parent event as starred |
 | `unstar` | Removes the star from the parent event |
-| `alert` | Marks the parent event as alerted |
-| `clear-alert` | Removes the alert from the parent event |
+| `alert` | Opens/activates the parent event's alert state |
+| `clear-alert` | Closes/clears the parent event's alert state |
+
+For an incident-oriented event, `alert` can represent an active incident and `clear-alert` its resolution. This is the only lifecycle-like state that the application currently derives and filters. The API has a dedicated star toggle, but alert transitions are created through the generic `POST /api/v1/events` endpoint.
+
+### Open and resolve an alert
+
+After creating a top-level event, open its alert state:
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events -d '{
+  "parent_id": "original-event-id",
+  "event_type": "alert",
+  "user_name": "on-call",
+  "description": "SEV0 response started"
+}'
+```
+
+Resolve it by appending the opposite transition:
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events -d '{
+  "parent_id": "original-event-id",
+  "event_type": "clear-alert",
+  "user_name": "on-call",
+  "description": "Incident resolved"
+}'
+```
 
 ### Lifecycle via linked events
 
-A deployment lifecycle (or any multi-phase operation) is modeled as separate events sharing a tag rather than as a single event with start/end timestamps:
+A deployment lifecycle (or any multi-phase operation) can be recorded as separate top-level events sharing an identifier tag rather than as a single event with start/end timestamps:
 
 ```bash
 # Deploy started
@@ -220,6 +257,8 @@ Query by tag to see the full lifecycle:
 ```bash
 pcr "http://localhost:8080/api/v1/events?tag=deploy_id:abc123"
 ```
+
+This convention records that a start and end happened, but the application does not pair or reduce `phase=start` and `phase=end` into current state. Both appear as separate dashboard rows. Only the `alert`/`clear-alert` pair has built-in current-state calculation.
 
 ## Idempotency
 
@@ -276,9 +315,11 @@ The built-in HTML dashboard is served at `/`. Authenticate by navigating to `/lo
 - Time range buttons to filter events by predefined windows (last 5 minutes, 30 minutes, 1 hour, and 24 hours)
 - Clickable tags that filter the event list to matching events
 - A star toggle on each event (creates star/unstar meta-events behind the scenes)
-- Visual alert highlighting for events that have active alert meta-events
-- Event detail page showing the event plus its annotation history (meta-event timeline)
+- An Alerts filter and visual highlighting for events whose current alert state is active
+- Event detail page showing the event and its current derived star/alert state
 - Auto-refresh at a configurable interval (see `PCR_DASHBOARD_REFRESH_SEC`)
+
+The dashboard always requests top-level events and defaults to events timestamped within the last 24 hours. Its Alerts filter combines current alert state with the selected time range; it is not an unbounded list of all active alerts. Use the API query shown above when an unbounded result is required.
 
 ## Data Model
 
@@ -297,7 +338,7 @@ Events are immutable. There are no update or delete operations. The core `Change
 | `tags` | map[string]string | Arbitrary key-value metadata for filtering and lifecycle linking |
 | `created_at` | RFC 3339 | Record creation time |
 
-Notably absent from the old model: `timestamp_start`, `timestamp_end`, `starred`, `alerted`, and `updated_at`. These are replaced by the single `timestamp` field, meta-events, and the principle that events do not change after creation.
+There are no mutable `timestamp_start`, `timestamp_end`, `starred`, `alerted`, or `updated_at` fields. Point-in-time lifecycle records use the single `timestamp` field and shared tags. Star and alert state are derived from meta-events. Events do not change after creation.
 
 ## Architecture
 
@@ -313,12 +354,12 @@ internal/
   router/          Route definitions (chi)
 migrations/        SQL migration files
 web/               Embedded static assets and HTML templates
-docs/              Design documents and roadmap
+docs/              Deployment and testing guides
 ```
 
 ## Deployment
 
-Three deployment options, from simplest to most production-like:
+Four deployment options, from simplest to most production-like:
 
 | Method | Command | Best for |
 |---|---|---|
@@ -363,7 +404,7 @@ For any deployment beyond a developer laptop, override it. Two pieces:
      PCR_API_TOKENS=... PCR_SESSION_SECRET=... docker compose up -d
      ```
 
-   - **`docker run`** -- pass via `-e` from your shell environment so the value never lands in shell history:
+   - **`docker run`** -- load the value into the environment from your secret-management workflow, then pass its name with `-e` so the value is not repeated in the `docker run` command:
 
      ```bash
      export PCR_SESSION_SECRET=<paste output of step 1>
@@ -385,15 +426,18 @@ Rotating the secret invalidates every existing session and CSRF token; users wil
 
 | Target | Description |
 |---|---|
-| `make build` | Compile to `bin/pcr-server` with version info |
-| `make test` | Run all tests with race detector and coverage |
-| `make test-short` | Run tests in short mode |
+| `make build` | Compile to `bin/pcr-server` |
+| `make test` | Run default (non-integration) tests with race detection and package coverage |
+| `make test-short` | Run default tests with Go's short-test flag |
+| `make coverage` | Write `coverage.out` and `coverage.html`, then open the report |
 | `make lint` | Run `golangci-lint` |
 | `make fmt` | Format with `gofmt` and `goimports` |
 | `make run` | `go run ./cmd/server` |
 | `make vet` | Run `go vet` |
 | `make audit` | Run `go vet` + `govulncheck` |
 | `make clean` | Remove build artifacts |
+| `make smoke` | Run the HTTP smoke suite against an ephemeral local server |
+| `make smoke-docker` | Run the HTTP smoke suite against an existing server |
 | `make docker-build` | Build Docker image |
 | `make docker-run` | Build and run Docker container |
 | `make docker-compose-up` | Start with Docker Compose |
@@ -405,9 +449,11 @@ Rotating the secret invalidates every existing session and CSRF token; users wil
 go test -race -tags=integration ./...
 ```
 
+See [docs/testing.md](docs/testing.md) for the smoke-test commands and focused manual checks of derived alert state.
+
 ## Auth
 
-The server follows a zero-trust-by-default model. Every request (reads and writes) must be authenticated unless `PCR_REQUIRE_AUTH_READS` is set to `false`, in which case only write operations require a token.
+The server follows a zero-trust-by-default model for protected routes. With the default `PCR_REQUIRE_AUTH_READS=true`, protected reads and writes require authentication. Setting it to `false` permits unauthenticated `GET` and `HEAD` requests, while protected writes still require authentication. Health, login, and static-asset routes are always public, as listed below.
 
 Authentication is performed via one of three methods (checked in this order):
 
@@ -434,6 +480,7 @@ All responses include `Referrer-Policy: no-referrer` and `X-Content-Type-Options
 ### Public routes
 
 Tokens are configured through the `PCR_API_TOKENS` environment variable (comma-separated). The following routes do not require authentication:
+
 - `/api/v1/health` — health check
 - `/static/*` — CSS and static assets
 - `/login` — session login endpoint
