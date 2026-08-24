@@ -31,18 +31,23 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Get("/login", loginHandler.ShowLoginForm)
 	r.Post("/login", loginHandler.Login)
 
-	// All remaining routes require authentication.
+	// API routes accept explicit tokens only. Browser session cookies are scoped
+	// to dashboard routes so ambient cookie authority cannot authenticate API
+	// writes that do not carry dashboard CSRF tokens.
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(cfg.APITokens, cfg.RequireAuthReads, cfg.SessionSecret))
+		r.Use(middleware.Auth(cfg.APITokens, cfg.RequireAuthReads, nil))
 
-		// API routes (append-only: create and read only, no update/delete).
 		r.Get("/api/v1/events", apiHandler.ListEvents)
 		r.Post("/api/v1/events", apiHandler.CreateEvent)
 		r.Get("/api/v1/events/{id}", apiHandler.GetEvent)
 		r.Get("/api/v1/events/{id}/annotations", apiHandler.GetEventAnnotations)
 		r.Post("/api/v1/events/{id}/star", apiHandler.ToggleStar)
+	})
 
-		// Dashboard routes.
+	// Dashboard routes accept browser sessions as well as explicit tokens.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Auth(cfg.APITokens, cfg.RequireAuthReads, cfg.SessionSecret))
+
 		r.Get("/", dashHandler.Dashboard)
 		r.Get("/events/{id}", dashHandler.Detail)
 		r.Post("/events/{id}/star", dashHandler.ToggleStar)

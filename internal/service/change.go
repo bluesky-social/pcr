@@ -47,7 +47,7 @@ func (s *ChangeService) Create(ctx context.Context, req *model.CreateChangeReque
 	now := time.Now().UTC()
 	ts := now
 	if req.Timestamp != nil {
-		ts = *req.Timestamp
+		ts = req.Timestamp.UTC()
 	}
 
 	tags := req.Tags
@@ -101,39 +101,9 @@ func (s *ChangeService) GetAnnotationsBatch(ctx context.Context, eventIDs []stri
 
 // ToggleStar creates a star or unstar meta-event for the given event.
 func (s *ChangeService) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
-	// Verify parent exists.
-	parent, err := s.store.GetByID(ctx, eventID)
-	if err != nil {
-		return nil, err
-	}
-	if parent == nil {
+	event, err := s.store.ToggleStar(ctx, eventID, userName)
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrEventNotFound
 	}
-
-	// Check current annotation state.
-	annotations, err := s.store.GetAnnotations(ctx, eventID)
-	if err != nil {
-		return nil, err
-	}
-
-	eventType := model.EventTypeStar
-	description := "starred"
-	if annotations != nil && annotations.Starred {
-		eventType = model.EventTypeUnstar
-		description = "unstarred"
-	}
-
-	now := time.Now().UTC()
-	metaEvent := &model.ChangeEvent{
-		ID:          uuid.Must(uuid.NewV7()).String(),
-		ParentID:    eventID,
-		UserName:    userName,
-		Timestamp:   now,
-		EventType:   eventType,
-		Description: description,
-		Tags:        make(map[string]string),
-		CreatedAt:   now,
-	}
-
-	return s.store.Create(ctx, metaEvent)
+	return event, err
 }

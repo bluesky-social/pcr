@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	sqlitedriver "github.com/golang-migrate/migrate/v4/database/sqlite"
@@ -46,7 +48,7 @@ func main() {
 // resource cleanup -- most importantly db.Close -- complete before exit.
 func run(cfg *config.Config) error {
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(%d)",
+		"file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(%d)&_txlock=immediate",
 		cfg.DatabasePath,
 		cfg.DBBusyTimeout.Milliseconds(),
 	)
@@ -92,26 +94,58 @@ func run(cfg *config.Config) error {
 
 	shutdownCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		sig := <-shutdownCh
-		slog.Info("received shutdown signal", "signal", sig)
-
-		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-
-		if err := srv.Shutdown(ctx); err != nil {
-			slog.Error("server shutdown error", "error", err)
-		}
-	}()
+	defer signal.Stop(shutdownCh)
 
 	slog.Info("starting server", "addr", cfg.Addr)
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", cfg.Addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
 
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("server exited with error: %w", err)
+	if err := serveUntilShutdown(srv, listener, shutdownCh, cfg.ShutdownTimeout); err != nil {
+		return err
 	}
 
 	slog.Info("server stopped gracefully")
+	return nil
+}
+
+// serveUntilShutdown owns the complete HTTP server lifecycle. In particular,
+// it does not return after the listener closes until Shutdown has finished
+// waiting for active handlers (or its configured deadline has expired).
+func serveUntilShutdown(
+	srv *http.Server,
+	listener net.Listener,
+	shutdownCh <-chan os.Signal,
+	shutdownTimeout time.Duration,
+) error {
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- srv.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveErrCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("server exited with error: %w", err)
+		}
+		return nil
+	case sig := <-shutdownCh:
+		slog.Info("received shutdown signal", "signal", sig)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	shutdownErr := srv.Shutdown(ctx)
+	serveErr := <-serveErrCh
+
+	if shutdownErr != nil {
+		return fmt.Errorf("server shutdown: %w", shutdownErr)
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return fmt.Errorf("server exited with error: %w", serveErr)
+	}
 	return nil
 }
 
@@ -140,24 +174,14 @@ func runMigrations(db *sql.DB) error {
 	// Handle dirty state from a previously failed migration.
 	version, dirty, verr := m.Version()
 	if verr != nil && !errors.Is(verr, migrate.ErrNoChange) && !errors.Is(verr, migrate.ErrNilVersion) {
-		return verr
+		return fmt.Errorf("read migration version: %w", verr)
 	}
 	if dirty {
-		slog.Warn(
-			"database is in dirty state, forcing version to resolve",
-			"version", version,
-		)
-		// version comes from migrate.Version, which numbers a small,
-		// embedded set of migration files. m.Force takes int (the API
-		// predates uint everywhere), so the conversion is safe in
-		// practice -- our migration count is tiny relative to MaxInt.
-		if ferr := m.Force(int(version)); ferr != nil {
-			return ferr
-		}
+		return fmt.Errorf("database migration is dirty at version %d; refusing to continue until it is repaired", version)
 	}
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return err
+		return fmt.Errorf("apply migrations: %w", err)
 	}
 
 	slog.Info("database migrations applied successfully")

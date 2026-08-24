@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +31,6 @@ func applyTestMigrations(t *testing.T, db *sql.DB) {
 	ctx := t.Context()
 	migrationFiles := []string{
 		"001_create_change_events.up.sql",
-		"002_add_external_id.up.sql",
 	}
 	for _, name := range migrationFiles {
 		sqlBytes, err := fs.ReadFile(migrations.FS, name)
@@ -46,7 +46,7 @@ func applyTestMigrations(t *testing.T, db *sql.DB) {
 func openTestDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)",
+		"file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate",
 		dbPath,
 	)
 	db, err := sql.Open("sqlite", dsn)
@@ -239,6 +239,97 @@ func TestCreate(t *testing.T) {
 			t.Errorf("len(Tags) = %d, want 0", len(got.Tags))
 		}
 	})
+}
+
+func TestCreateReturnsCanonicalDefensiveCopy(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	offset := time.FixedZone("test-offset", 2*60*60)
+	timestamp := time.Date(2026, 8, 24, 12, 34, 56, 789_000_000, offset)
+	createdAt := timestamp.Add(time.Second)
+	event := makeEvent("canonical-copy", "alice", model.EventTypeDeployment, timestamp, map[string]string{"env": "prod"})
+	event.CreatedAt = createdAt
+
+	got, err := s.Create(t.Context(), event)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if got == event {
+		t.Fatal("Create() returned the caller-owned event pointer")
+	}
+	if want := timestamp.UTC().Truncate(time.Second); !got.Timestamp.Equal(want) || got.Timestamp.Location() != time.UTC {
+		t.Errorf("Timestamp = %v (%v), want %v (UTC)", got.Timestamp, got.Timestamp.Location(), want)
+	}
+	if want := createdAt.UTC().Truncate(time.Second); !got.CreatedAt.Equal(want) || got.CreatedAt.Location() != time.UTC {
+		t.Errorf("CreatedAt = %v (%v), want %v (UTC)", got.CreatedAt, got.CreatedAt.Location(), want)
+	}
+
+	event.Tags["env"] = "caller-mutated"
+	if got.Tags["env"] != "prod" {
+		t.Errorf("returned Tags changed with input map: got %q, want prod", got.Tags["env"])
+	}
+	got.Tags["env"] = "result-mutated"
+	persisted, err := s.GetByID(t.Context(), event.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if persisted.Tags["env"] != "prod" {
+		t.Errorf("persisted Tags = %q after result mutation, want prod", persisted.Tags["env"])
+	}
+}
+
+func TestToggleStarIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	if _, err := s.ToggleStar(t.Context(), "missing", "alice"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("ToggleStar(missing) error = %v, want %v", err, store.ErrNotFound)
+	}
+
+	parent := makeEvent("toggle-parent", "alice", model.EventTypeDeployment, time.Now().UTC(), nil)
+	if _, err := s.Create(t.Context(), parent); err != nil {
+		t.Fatalf("Create(parent) error = %v", err)
+	}
+
+	const toggles = 20
+	start := make(chan struct{})
+	errs := make(chan error, toggles)
+	var wg sync.WaitGroup
+	for range toggles {
+		wg.Go(func() {
+			<-start
+			_, err := s.ToggleStar(t.Context(), parent.ID, "concurrent-user")
+			errs <- err
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("ToggleStar() error = %v", err)
+		}
+	}
+
+	annotations, err := s.GetAnnotations(t.Context(), parent.ID)
+	if err != nil {
+		t.Fatalf("GetAnnotations() error = %v", err)
+	}
+	if annotations.Starred {
+		t.Fatal("even number of concurrent toggles left event starred")
+	}
+
+	if _, err := s.ToggleStar(t.Context(), parent.ID, "concurrent-user"); err != nil {
+		t.Fatalf("final ToggleStar() error = %v", err)
+	}
+	annotations, err = s.GetAnnotations(t.Context(), parent.ID)
+	if err != nil {
+		t.Fatalf("GetAnnotations() after final toggle error = %v", err)
+	}
+	if !annotations.Starred {
+		t.Fatal("odd number of toggles left event unstarred")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +590,38 @@ func TestList(t *testing.T) {
 				t.Errorf("events not in descending order at index %d: %v > %v",
 					i, res.Events[i].Timestamp, res.Events[i-1].Timestamp)
 			}
+		}
+	})
+
+	t.Run("offset timestamps use chronological UTC ordering", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		ctx := t.Context()
+		early := time.Date(2026, 1, 1, 1, 0, 0, 0, time.FixedZone("UTC+1", 60*60))
+		later := time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)
+		if _, err := s.Create(ctx, makeEvent("offset-early", "alice", model.EventTypeDeployment, early, nil)); err != nil {
+			t.Fatalf("Create(offset-early) error = %v", err)
+		}
+		if _, err := s.Create(ctx, makeEvent("offset-later", "alice", model.EventTypeDeployment, later, nil)); err != nil {
+			t.Fatalf("Create(offset-later) error = %v", err)
+		}
+
+		startAfter := time.Date(2026, 1, 1, 1, 15, 0, 0, time.FixedZone("UTC+1", 60*60))
+		result, err := s.List(ctx, model.ListParams{StartAfter: &startAfter})
+		if err != nil {
+			t.Fatalf("List(StartAfter) error = %v", err)
+		}
+		if len(result.Events) != 1 || result.Events[0].ID != "offset-later" {
+			t.Fatalf("List(StartAfter) events = %+v, want only offset-later", result.Events)
+		}
+
+		event, err := s.GetByID(ctx, "offset-early")
+		if err != nil {
+			t.Fatalf("GetByID(offset-early) error = %v", err)
+		}
+		if event.Timestamp.Location() != time.UTC {
+			t.Errorf("GetByID(offset-early) location = %v, want UTC", event.Timestamp.Location())
 		}
 	})
 

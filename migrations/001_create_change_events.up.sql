@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS change_events (
     id               TEXT PRIMARY KEY,
+    external_id      TEXT,
     parent_id        TEXT REFERENCES change_events(id),
     user_name        TEXT NOT NULL,
     timestamp        TEXT NOT NULL,
@@ -13,6 +14,7 @@ CREATE INDEX IF NOT EXISTS idx_change_events_timestamp ON change_events (timesta
 CREATE INDEX IF NOT EXISTS idx_change_events_event_type ON change_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_change_events_user_name ON change_events (user_name);
 CREATE INDEX IF NOT EXISTS idx_change_events_parent_id ON change_events (parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_change_events_external_id ON change_events (external_id) WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS change_event_tags (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,

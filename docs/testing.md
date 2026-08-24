@@ -151,5 +151,5 @@ Open `http://localhost:8080/login`, enter `test-token`, and verify:
 With the default `PCR_REQUIRE_AUTH_READS=true`:
 
 - `/api/v1/health`, `/login`, and `/static/*` are public.
-- Other reads and all writes require a Bearer token, a valid session cookie, or the backwards-compatible `token` query parameter.
+- API reads and writes require a Bearer token or the backwards-compatible `token` query parameter. Dashboard routes also accept a valid session cookie.
 - Setting `PCR_REQUIRE_AUTH_READS=false` makes `GET` and `HEAD` requests public; writes still require authentication.

@@ -261,6 +261,38 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid operational values return actionable errors", func(t *testing.T) {
+		tests := []struct {
+			key   string
+			value string
+		}{
+			{key: "PCR_DASHBOARD_REFRESH_SEC", value: "-1"},
+			{key: "PCR_READ_TIMEOUT", value: "0s"},
+			{key: "PCR_READ_TIMEOUT", value: "-1s"},
+			{key: "PCR_WRITE_TIMEOUT", value: "0s"},
+			{key: "PCR_SHUTDOWN_TIMEOUT", value: "-1s"},
+			{key: "PCR_DB_BUSY_TIMEOUT", value: "0s"},
+			{key: "PCR_DB_SLOW_QUERY_THRESHOLD", value: "-1ms"},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+				clearOptionalEnv(t)
+				t.Setenv("PCR_API_TOKENS", "tok1")
+				t.Setenv("PCR_SESSION_SECRET", validSessionSecret)
+				t.Setenv(tc.key, tc.value)
+
+				_, err := config.Load()
+				if err == nil {
+					t.Fatalf("Load() error = nil, want validation error for %s", tc.key)
+				}
+				if !strings.Contains(err.Error(), tc.key) {
+					t.Fatalf("Load() error = %q, want variable %s", err, tc.key)
+				}
+			})
+		}
+	})
+
 	t.Run("generated session secret is 32 bytes and differs between calls", func(t *testing.T) {
 		t.Setenv("PCR_API_TOKENS", "tok1")
 		t.Setenv("PCR_SESSION_SECRET", "")

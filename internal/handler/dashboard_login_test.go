@@ -17,6 +17,7 @@ import (
 	"github.com/sarah/go-prod-change-registry/internal/middleware"
 	"github.com/sarah/go-prod-change-registry/internal/model"
 	"github.com/sarah/go-prod-change-registry/internal/service"
+	"github.com/sarah/go-prod-change-registry/internal/store"
 )
 
 // loginStack holds the components for LoginHandler tests.
@@ -563,23 +564,15 @@ func TestDashboardToggleStar(t *testing.T) {
 	// setupToggleStarMocks configures the store for a successful star toggle.
 	setupToggleStarMocks := func(ds *dashboardStack) {
 		now := time.Now().UTC()
-		ds.store.getByIDFn = func(_ context.Context, id string) (*model.ChangeEvent, error) {
-			if id == "evt-star-001" {
-				return &model.ChangeEvent{
-					ID:        "evt-star-001",
-					UserName:  "alice",
-					EventType: "deployment",
-					Timestamp: now,
-					CreatedAt: now,
-				}, nil
-			}
-			return nil, nil
-		}
-		ds.store.getAnnotationsFn = func(_ context.Context, _ string) (*model.EventAnnotations, error) {
-			return &model.EventAnnotations{Starred: false, Alerted: false}, nil
-		}
-		ds.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
-			return event, nil
+		ds.store.toggleStarFn = func(_ context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{
+				ID:        "star-1",
+				ParentID:  eventID,
+				UserName:  userName,
+				EventType: model.EventTypeStar,
+				Timestamp: now,
+				CreatedAt: now,
+			}, nil
 		}
 	}
 
@@ -693,8 +686,8 @@ func TestDashboardToggleStar(t *testing.T) {
 		t.Parallel()
 
 		ds := newDashboardTestStack()
-		ds.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
-			return nil, nil
+		ds.store.toggleStarFn = func(_ context.Context, _, _ string) (*model.ChangeEvent, error) {
+			return nil, store.ErrNotFound
 		}
 
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events/nonexistent/star", nil)

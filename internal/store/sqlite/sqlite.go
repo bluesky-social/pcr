@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sarah/go-prod-change-registry/internal/model"
 	"github.com/sarah/go-prod-change-registry/internal/store"
 )
@@ -21,6 +24,7 @@ var _ store.ChangeStore = (*Store)(nil)
 type Store struct {
 	db                 *sql.DB
 	slowQueryThreshold time.Duration
+	toggleMu           sync.Mutex
 }
 
 // New wraps an existing *sql.DB connection as a Store.
@@ -103,11 +107,11 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 		nullableString(event.ExternalID),
 		parentID,
 		event.UserName,
-		event.Timestamp.Format(time.RFC3339),
+		formatTimestamp(event.Timestamp),
 		event.EventType,
 		event.Description,
 		event.LongDescription,
-		event.CreatedAt.Format(time.RFC3339),
+		formatTimestamp(event.CreatedAt),
 	)
 	if err != nil && event.ExternalID != "" && isUniqueViolation(err) {
 		// Event with this external_id already exists — return it (idempotent).
@@ -132,7 +136,102 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
-	return s.GetByID(ctx, event.ID)
+	result = &model.ChangeEvent{
+		ID:              event.ID,
+		ExternalID:      event.ExternalID,
+		ParentID:        event.ParentID,
+		UserName:        event.UserName,
+		Timestamp:       canonicalTime(event.Timestamp),
+		EventType:       event.EventType,
+		Description:     event.Description,
+		LongDescription: event.LongDescription,
+		Tags:            maps.Clone(event.Tags),
+		CreatedAt:       canonicalTime(event.CreatedAt),
+	}
+	return result, nil
+}
+
+// ToggleStar atomically reads the latest star transition and appends its
+// opposite. The process-local mutex avoids unnecessary SQLITE_BUSY retries
+// between requests handled by this Store; the immediate SQLite transaction
+// configured by the caller provides the corresponding database-level lock.
+func (s *Store) ToggleStar(ctx context.Context, eventID, userName string) (result *model.ChangeEvent, err error) {
+	start := time.Now()
+	defer func() { s.logOperation(ctx, "ToggleStar", start, err) }()
+
+	s.toggleMu.Lock()
+	defer s.toggleMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // safe: rollback after successful commit returns sql.ErrTxDone
+
+	var exists int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM change_events WHERE id = ?`, eventID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("check parent event: %w", err)
+	}
+
+	eventType := model.EventTypeStar
+	description := "starred"
+	var latestType string
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT event_type FROM change_events
+		 WHERE parent_id = ? AND event_type IN ('star', 'unstar')
+		 ORDER BY rowid DESC LIMIT 1`,
+		eventID,
+	).Scan(&latestType)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("read star state: %w", err)
+	}
+	if err == nil && latestType == model.EventTypeStar {
+		eventType = model.EventTypeUnstar
+		description = "unstarred"
+	}
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("generate event ID: %w", err)
+	}
+	now := canonicalTime(time.Now())
+	result = &model.ChangeEvent{
+		ID:          id.String(),
+		ParentID:    eventID,
+		UserName:    userName,
+		Timestamp:   now,
+		EventType:   eventType,
+		Description: description,
+		Tags:        make(map[string]string),
+		CreatedAt:   now,
+	}
+
+	_, err = tx.ExecContext(
+		ctx,
+		`INSERT INTO change_events
+		 (id, external_id, parent_id, user_name, timestamp, event_type, description, long_description, created_at)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?, '', ?)`,
+		result.ID,
+		result.ParentID,
+		result.UserName,
+		formatTimestamp(result.Timestamp),
+		result.EventType,
+		result.Description,
+		formatTimestamp(result.CreatedAt),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert star transition: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return result, nil
 }
 
 // GetByID retrieves a single change event by ID, including its tags.
@@ -253,7 +352,7 @@ func (s *Store) GetAnnotations(ctx context.Context, eventID string) (result *mod
 		ctx,
 		`SELECT event_type FROM change_events
 		 WHERE parent_id = ? AND event_type IN ('star', 'unstar', 'alert', 'clear-alert')
-		 ORDER BY created_at DESC, id DESC`,
+		 ORDER BY rowid DESC`,
 		eventID,
 	)
 	if err != nil {
@@ -331,7 +430,7 @@ func (s *Store) GetAnnotationsBatch(ctx context.Context, eventIDs []string) (res
 	query := fmt.Sprintf(
 		`SELECT parent_id, event_type FROM change_events
 		 WHERE parent_id IN (%s) AND event_type IN ('star', 'unstar', 'alert', 'clear-alert')
-		 ORDER BY created_at DESC, id DESC`,
+		 ORDER BY rowid DESC`,
 		strings.Join(placeholders, ","),
 	)
 
@@ -572,18 +671,18 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 		windowStart := params.Around.Add(-*params.Window)
 		windowEnd := params.Around.Add(*params.Window)
 		clauses = append(clauses, "timestamp >= ?")
-		args = append(args, windowStart.Format(time.RFC3339))
+		args = append(args, formatTimestamp(windowStart))
 		clauses = append(clauses, "timestamp < ?")
-		args = append(args, windowEnd.Format(time.RFC3339))
+		args = append(args, formatTimestamp(windowEnd))
 	} else {
 		if params.StartAfter != nil {
 			clauses = append(clauses, "timestamp >= ?")
-			args = append(args, params.StartAfter.Format(time.RFC3339))
+			args = append(args, formatTimestamp(*params.StartAfter))
 		}
 
 		if params.StartBefore != nil {
 			clauses = append(clauses, "timestamp < ?")
-			args = append(args, params.StartBefore.Format(time.RFC3339))
+			args = append(args, formatTimestamp(*params.StartBefore))
 		}
 	}
 
@@ -612,7 +711,7 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 				SELECT 1 FROM change_events AS newer
 				WHERE newer.parent_id = meta.parent_id
 				AND newer.event_type IN ('alert', 'clear-alert')
-				AND (newer.created_at > meta.created_at OR (newer.created_at = meta.created_at AND newer.id > meta.id))
+				AND newer.rowid > meta.rowid
 			)
 			AND meta.event_type = 'alert'
 		)`)
@@ -637,6 +736,17 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 	}
 
 	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// formatTimestamp returns the canonical representation used by SQLite text
+// comparisons. Keeping every stored value and query bound in UTC makes
+// lexicographic ordering equivalent to chronological ordering.
+func formatTimestamp(t time.Time) string {
+	return canonicalTime(t).Format(time.RFC3339)
+}
+
+func canonicalTime(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Second)
 }
 
 // nullableString returns a *string pointer for use with SQL parameters.

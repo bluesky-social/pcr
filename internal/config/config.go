@@ -67,7 +67,32 @@ func Load() (*Config, error) {
 		}
 	}
 
+	if err := validate(cfg); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+func validate(cfg *Config) error {
+	if cfg.DashboardRefreshSec < 0 {
+		return fmt.Errorf("PCR_DASHBOARD_REFRESH_SEC must be greater than or equal to 0")
+	}
+	for _, timeout := range []struct {
+		key   string
+		value time.Duration
+	}{
+		{key: "PCR_READ_TIMEOUT", value: cfg.ReadTimeout},
+		{key: "PCR_WRITE_TIMEOUT", value: cfg.WriteTimeout},
+		{key: "PCR_SHUTDOWN_TIMEOUT", value: cfg.ShutdownTimeout},
+		{key: "PCR_DB_BUSY_TIMEOUT", value: cfg.DBBusyTimeout},
+		{key: "PCR_DB_SLOW_QUERY_THRESHOLD", value: cfg.DBSlowQueryThreshold},
+	} {
+		if timeout.value <= 0 {
+			return fmt.Errorf("%s must be greater than 0", timeout.key)
+		}
+	}
+	return nil
 }
 
 // loadAPITokens reads PCR_API_TOKENS (required, comma-separated) and writes

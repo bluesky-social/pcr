@@ -21,6 +21,7 @@ import (
 // mockStore implements store.ChangeStore using configurable function fields.
 type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
+	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
@@ -35,6 +36,13 @@ func (m *mockStore) Create(ctx context.Context, event *model.ChangeEvent) (*mode
 		return m.createFn(ctx, event)
 	}
 	panic("unexpected call to Create")
+}
+
+func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	if m.toggleStarFn != nil {
+		return m.toggleStarFn(ctx, eventID, userName)
+	}
+	panic("unexpected call to ToggleStar")
 }
 
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
@@ -741,29 +749,15 @@ func TestToggleStar(t *testing.T) {
 
 		ts := newTestStack()
 
-		now := time.Now().UTC()
-		parentEvent := &model.ChangeEvent{
-			ID:          "evt-parent-star",
-			UserName:    "alice",
-			EventType:   "deployment",
-			Description: "deploy v1.0",
-			Timestamp:   now,
-			CreatedAt:   now,
-		}
-		ts.store.getByIDFn = func(_ context.Context, id string) (*model.ChangeEvent, error) {
-			if id == "evt-parent-star" {
-				return parentEvent, nil
-			}
-			return nil, nil
-		}
-		ts.store.getAnnotationsFn = func(_ context.Context, _ string) (*model.EventAnnotations, error) {
-			return &model.EventAnnotations{Starred: false, Alerted: false}, nil
-		}
-
 		var createdEvent *model.ChangeEvent
-		ts.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
-			createdEvent = event
-			return event, nil
+		ts.store.toggleStarFn = func(_ context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+			createdEvent = &model.ChangeEvent{
+				ID:        "star-1",
+				ParentID:  eventID,
+				UserName:  userName,
+				EventType: model.EventTypeStar,
+			}
+			return createdEvent, nil
 		}
 
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/evt-parent-star/star", nil)
@@ -775,7 +769,7 @@ func TestToggleStar(t *testing.T) {
 		}
 
 		if createdEvent == nil {
-			t.Fatal("expected store.Create to be called")
+			t.Fatal("expected store.ToggleStar to be called")
 		}
 		if createdEvent.ParentID != "evt-parent-star" {
 			t.Fatalf("expected parent_id evt-parent-star, got %q", createdEvent.ParentID)
@@ -790,8 +784,8 @@ func TestToggleStar(t *testing.T) {
 
 		ts := newTestStack()
 
-		ts.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
-			return nil, nil
+		ts.store.toggleStarFn = func(_ context.Context, _, _ string) (*model.ChangeEvent, error) {
+			return nil, store.ErrNotFound
 		}
 
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/nonexistent/star", nil)

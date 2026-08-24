@@ -16,6 +16,7 @@ import (
 // catching unexpected calls early.
 type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
+	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
@@ -27,6 +28,13 @@ func (m *mockStore) Create(ctx context.Context, event *model.ChangeEvent) (*mode
 		panic("unexpected call to Create")
 	}
 	return m.createFn(ctx, event)
+}
+
+func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	if m.toggleStarFn == nil {
+		panic("unexpected call to ToggleStar")
+	}
+	return m.toggleStarFn(ctx, eventID, userName)
 }
 
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
@@ -255,10 +263,11 @@ func TestCreate(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit timestamp is preserved", func(t *testing.T) {
+	t.Run("explicit timestamp is normalized to UTC", func(t *testing.T) {
 		t.Parallel()
 
-		explicit := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+		explicit := time.Date(2025, 6, 15, 13, 0, 0, 0, time.FixedZone("UTC+1", 60*60))
+		want := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 		ms := &mockStore{
 			createFn: func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
 				cp := *event
@@ -267,7 +276,7 @@ func TestCreate(t *testing.T) {
 		}
 		svc := service.NewChangeService(ms)
 
-		got, err := svc.Create(context.Background(), &model.CreateChangeRequest{
+		got, err := svc.Create(t.Context(), &model.CreateChangeRequest{
 			UserName:  "bob",
 			EventType: model.EventTypeFeatureFlag,
 			Timestamp: new(explicit),
@@ -275,8 +284,8 @@ func TestCreate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !got.Timestamp.Equal(explicit) {
-			t.Fatalf("Timestamp = %v, want %v", got.Timestamp, explicit)
+		if !got.Timestamp.Equal(want) || got.Timestamp.Location() != time.UTC {
+			t.Fatalf("Timestamp = %v (%v), want %v (UTC)", got.Timestamp, got.Timestamp.Location(), want)
 		}
 	})
 }
@@ -472,26 +481,19 @@ func TestList(t *testing.T) {
 func TestToggleStar(t *testing.T) {
 	t.Parallel()
 
-	t.Run("stars when not starred", func(t *testing.T) {
+	t.Run("delegates atomic toggle to store", func(t *testing.T) {
 		t.Parallel()
 
-		parent := &model.ChangeEvent{ID: "evt-1", UserName: "alice"}
-
-		var capturedEvent *model.ChangeEvent
+		want := &model.ChangeEvent{ID: "star-1", ParentID: "evt-1", UserName: "bob", EventType: model.EventTypeStar}
 		ms := &mockStore{
-			getByIDFn: func(_ context.Context, id string) (*model.ChangeEvent, error) {
-				if id == "evt-1" {
-					return parent, nil
+			toggleStarFn: func(_ context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+				if eventID != "evt-1" {
+					t.Errorf("eventID = %q, want evt-1", eventID)
 				}
-				return nil, nil
-			},
-			getAnnotationsFn: func(_ context.Context, _ string) (*model.EventAnnotations, error) {
-				return &model.EventAnnotations{Starred: false, Alerted: false}, nil
-			},
-			createFn: func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
-				capturedEvent = event
-				cp := *event
-				return &cp, nil
+				if userName != "bob" {
+					t.Errorf("userName = %q, want bob", userName)
+				}
+				return want, nil
 			},
 		}
 		svc := service.NewChangeService(ms)
@@ -501,69 +503,17 @@ func TestToggleStar(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if capturedEvent == nil {
-			t.Fatal("store.Create was not called")
-		}
-		if capturedEvent.EventType != model.EventTypeStar {
-			t.Errorf("EventType = %q, want %q", capturedEvent.EventType, model.EventTypeStar)
-		}
-		if capturedEvent.ParentID != "evt-1" {
-			t.Errorf("ParentID = %q, want %q", capturedEvent.ParentID, "evt-1")
-		}
-		if capturedEvent.UserName != "bob" {
-			t.Errorf("UserName = %q, want %q", capturedEvent.UserName, "bob")
-		}
-		if got.EventType != model.EventTypeStar {
-			t.Errorf("returned EventType = %q, want %q", got.EventType, model.EventTypeStar)
+		if got != want {
+			t.Errorf("ToggleStar() = %p, want %p", got, want)
 		}
 	})
 
-	t.Run("unstars when already starred", func(t *testing.T) {
-		t.Parallel()
-
-		parent := &model.ChangeEvent{ID: "evt-2", UserName: "alice"}
-
-		var capturedEvent *model.ChangeEvent
-		ms := &mockStore{
-			getByIDFn: func(_ context.Context, id string) (*model.ChangeEvent, error) {
-				if id == "evt-2" {
-					return parent, nil
-				}
-				return nil, nil
-			},
-			getAnnotationsFn: func(_ context.Context, _ string) (*model.EventAnnotations, error) {
-				return &model.EventAnnotations{Starred: true, Alerted: false}, nil
-			},
-			createFn: func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
-				capturedEvent = event
-				cp := *event
-				return &cp, nil
-			},
-		}
-		svc := service.NewChangeService(ms)
-
-		got, err := svc.ToggleStar(context.Background(), "evt-2", "bob")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if capturedEvent == nil {
-			t.Fatal("store.Create was not called")
-		}
-		if capturedEvent.EventType != model.EventTypeUnstar {
-			t.Errorf("EventType = %q, want %q", capturedEvent.EventType, model.EventTypeUnstar)
-		}
-		if got.EventType != model.EventTypeUnstar {
-			t.Errorf("returned EventType = %q, want %q", got.EventType, model.EventTypeUnstar)
-		}
-	})
-
-	t.Run("not-found parent returns error", func(t *testing.T) {
+	t.Run("not-found parent maps to service error", func(t *testing.T) {
 		t.Parallel()
 
 		ms := &mockStore{
-			getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) {
-				return nil, nil
+			toggleStarFn: func(_ context.Context, _, _ string) (*model.ChangeEvent, error) {
+				return nil, store.ErrNotFound
 			},
 		}
 		svc := service.NewChangeService(ms)
@@ -574,12 +524,12 @@ func TestToggleStar(t *testing.T) {
 		}
 	})
 
-	t.Run("store GetByID error propagates", func(t *testing.T) {
+	t.Run("store error propagates", func(t *testing.T) {
 		t.Parallel()
 
 		storeErr := errors.New("db failure")
 		ms := &mockStore{
-			getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			toggleStarFn: func(_ context.Context, _, _ string) (*model.ChangeEvent, error) {
 				return nil, storeErr
 			},
 		}

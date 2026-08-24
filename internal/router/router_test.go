@@ -21,6 +21,7 @@ import (
 // mockStore implements store.ChangeStore with configurable function fields.
 type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
+	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
@@ -34,6 +35,13 @@ func (m *mockStore) Create(ctx context.Context, event *model.ChangeEvent) (*mode
 		return m.createFn(ctx, event)
 	}
 	panic("unexpected call to Create")
+}
+
+func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	if m.toggleStarFn != nil {
+		return m.toggleStarFn(ctx, eventID, userName)
+	}
+	panic("unexpected call to ToggleStar")
 }
 
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
@@ -89,6 +97,16 @@ func newTestRouter(t *testing.T, requireAuthReads bool) (http.Handler, *mockStor
 		createFn: func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
 			cp := *event
 			return &cp, nil
+		},
+		toggleStarFn: func(_ context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{
+				ID:        "star-id",
+				ParentID:  eventID,
+				UserName:  userName,
+				EventType: model.EventTypeStar,
+				Timestamp: now,
+				CreatedAt: now,
+			}, nil
 		},
 		getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) {
 			return &model.ChangeEvent{
@@ -259,6 +277,40 @@ func TestAuthEnforcement(t *testing.T) {
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("session cookie is limited to dashboard routes", func(t *testing.T) {
+		t.Parallel()
+
+		r, _ := newTestRouter(t, true)
+		cookieRecorder := httptest.NewRecorder()
+		middleware.SetSessionCookie(cookieRecorder, middleware.SessionOptions{Secret: []byte("test-session-secret")})
+		cookies := cookieRecorder.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("session cookie count = %d, want 1", len(cookies))
+		}
+
+		apiReq := httptest.NewRequestWithContext(
+			t.Context(),
+			http.MethodPost,
+			"/api/v1/events",
+			bytes.NewBufferString(`{"user_name":"sarah","event_type":"deployment"}`),
+		)
+		apiReq.Header.Set("Content-Type", "application/json")
+		apiReq.AddCookie(cookies[0])
+		apiRec := httptest.NewRecorder()
+		r.ServeHTTP(apiRec, apiReq)
+		if apiRec.Code != http.StatusUnauthorized {
+			t.Fatalf("API status = %d, want 401", apiRec.Code)
+		}
+
+		dashboardReq := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+		dashboardReq.AddCookie(cookies[0])
+		dashboardRec := httptest.NewRecorder()
+		r.ServeHTTP(dashboardRec, dashboardReq)
+		if dashboardRec.Code != http.StatusOK {
+			t.Fatalf("dashboard status = %d, want 200", dashboardRec.Code)
 		}
 	})
 

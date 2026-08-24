@@ -458,7 +458,7 @@ The server follows a zero-trust-by-default model for protected routes. With the 
 Authentication is performed via one of three methods (checked in this order):
 
 1. **Bearer token header:** `Authorization: Bearer <token>` — used by API clients, scripts, CI/CD
-2. **Session cookie:** Set by the `/login` endpoint — used by the dashboard in browsers
+2. **Session cookie:** Set by the `/login` endpoint — accepted only by dashboard routes in browsers; API routes require a Bearer token or query token
 3. **Query parameter:** `?token=<token>` — backwards-compatible fallback
 
 ### Dashboard login
