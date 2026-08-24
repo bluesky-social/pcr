@@ -156,13 +156,27 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 	return result, nil
 }
 
-// ToggleStar atomically reads the latest star transition and appends its
-// opposite. The process-local mutex avoids unnecessary SQLITE_BUSY retries
-// between requests handled by this Store; the immediate SQLite transaction
-// configured by the caller provides the corresponding database-level lock.
+// ToggleStar atomically appends the opposite star transition.
 func (s *Store) ToggleStar(ctx context.Context, eventID, userName string) (result *model.ChangeEvent, err error) {
 	start := time.Now()
 	defer func() { s.logOperation(ctx, "ToggleStar", start, err) }()
+	return s.toggleTransition(ctx, eventID, userName, model.EventTypeStar, model.EventTypeUnstar, "starred", "unstarred")
+}
+
+// ToggleAlert atomically appends the opposite alert transition.
+func (s *Store) ToggleAlert(ctx context.Context, eventID, userName string) (result *model.ChangeEvent, err error) {
+	start := time.Now()
+	defer func() { s.logOperation(ctx, "ToggleAlert", start, err) }()
+	return s.toggleTransition(ctx, eventID, userName, model.EventTypeAlert, model.EventTypeClearAlert, "alert opened", "alert cleared")
+}
+
+// toggleTransition serializes a read-latest/append-opposite state change. The
+// process-local mutex avoids unnecessary SQLITE_BUSY retries between requests;
+// the immediate transaction configured by the caller supplies the DB lock.
+func (s *Store) toggleTransition(
+	ctx context.Context,
+	eventID, userName, activeType, inactiveType, activeDescription, inactiveDescription string,
+) (result *model.ChangeEvent, err error) {
 
 	s.toggleMu.Lock()
 	defer s.toggleMu.Unlock()
@@ -182,22 +196,24 @@ func (s *Store) ToggleStar(ctx context.Context, eventID, userName string) (resul
 		return nil, fmt.Errorf("check parent event: %w", err)
 	}
 
-	eventType := model.EventTypeStar
-	description := "starred"
+	eventType := activeType
+	description := activeDescription
 	var latestType string
 	err = tx.QueryRowContext(
 		ctx,
 		`SELECT event_type FROM change_events
-		 WHERE parent_id = ? AND event_type IN ('star', 'unstar')
+		 WHERE parent_id = ? AND event_type IN (?, ?)
 		 ORDER BY rowid DESC LIMIT 1`,
 		eventID,
+		activeType,
+		inactiveType,
 	).Scan(&latestType)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("read star state: %w", err)
+		return nil, fmt.Errorf("read transition state: %w", err)
 	}
-	if err == nil && latestType == model.EventTypeStar {
-		eventType = model.EventTypeUnstar
-		description = "unstarred"
+	if err == nil && latestType == activeType {
+		eventType = inactiveType
+		description = inactiveDescription
 	}
 
 	id, err := uuid.NewV7()
@@ -230,7 +246,7 @@ func (s *Store) ToggleStar(ctx context.Context, eventID, userName string) (resul
 		formatTimestamp(result.CreatedAt),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("insert star transition: %w", err)
+		return nil, fmt.Errorf("insert transition: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -392,6 +408,8 @@ ended AS MATERIALIZED (
 active AS (
 	SELECT candidate.id,
 	       candidate.timestamp,
+	       candidate.correlation_key,
+	       candidate.correlation_value,
 	       ROW_NUMBER() OVER (
 	           PARTITION BY candidate.event_type,
 	                        candidate.correlation_key,
@@ -887,6 +905,11 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 	clauses := make([]string, 0)
 	args := make([]any, 0)
 
+	if params.ParentID != "" {
+		clauses = append(clauses, "parent_id = ?")
+		args = append(args, params.ParentID)
+	}
+
 	// Around+Window takes precedence over StartAfter/StartBefore when set.
 	if params.Around != nil && params.Window != nil && *params.Window > 0 {
 		windowStart := params.Around.Add(-*params.Window)
@@ -916,7 +939,6 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 		clauses = append(clauses, "event_type = ?")
 		args = append(args, params.EventType)
 	}
-
 	if params.TopLevel {
 		clauses = append(clauses, "parent_id IS NULL")
 	}
@@ -986,6 +1008,14 @@ func buildCurrentWhereClause(params model.CurrentParams) (string, []any) {
 	if params.EventType != "" {
 		clauses = append(clauses, "event.event_type = ?")
 		args = append(args, params.EventType)
+	}
+	if params.CorrelationKey != "" {
+		clauses = append(clauses, "active.correlation_key = ?")
+		args = append(args, params.CorrelationKey)
+	}
+	if params.CorrelationValue != "" {
+		clauses = append(clauses, "active.correlation_value = ?")
+		args = append(args, params.CorrelationValue)
 	}
 
 	return " WHERE " + strings.Join(clauses, " AND "), args

@@ -19,6 +19,7 @@ var ErrDuplicate = errors.New("duplicate external_id")
 type ChangeStore interface {
 	Create(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
 	ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
+	ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	GetByID(ctx context.Context, id string) (*model.ChangeEvent, error)
 	List(ctx context.Context, params model.ListParams) (*model.ListResult, error)
 	ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)

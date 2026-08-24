@@ -54,7 +54,11 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 | `GET` | `/api/v1/current` | List active logical operations derived from phase events |
 | `GET` | `/api/v1/events/{id}` | Get a single event |
 | `GET` | `/api/v1/events/{id}/annotations` | Get derived annotation state (starred, alerted) |
+| `GET` | `/api/v1/events/{id}/activity` | List annotations and lifecycle closure activity |
+| `POST` | `/api/v1/events/{id}/links` | Append one or more external-link annotations |
 | `POST` | `/api/v1/events/{id}/star` | Toggle star (creates a star or unstar meta-event) |
+| `POST` | `/api/v1/events/{id}/alert` | Toggle alert (creates an alert or clear-alert meta-event) |
+| `POST` | `/api/v1/events/{id}/close` | Close a current operation by appending a correlated end event |
 
 ### Dashboard routes
 
@@ -63,6 +67,9 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 | `GET` | `/` | Dashboard (requires session cookie or token) |
 | `GET` | `/events/{id}` | Event detail page |
 | `POST` | `/events/{id}/star` | Toggle star (redirects back, requires CSRF token) |
+| `POST` | `/events/{id}/alert` | Toggle alert state (redirects back, requires CSRF token) |
+| `POST` | `/events/{id}/links` | Append external links (redirects back, requires CSRF token) |
+| `POST` | `/events/{id}/close` | Close an open operation (redirects back, requires CSRF token) |
 | `GET` | `/login` | Show login form |
 | `POST` | `/login` | Submit token, set session cookie, redirect to dashboard |
 
@@ -181,6 +188,43 @@ pcr -X POST http://localhost:8080/api/v1/events/abc123/star
 
 This creates a `star` or `unstar` meta-event depending on the current state.
 
+**Append links to an existing event:**
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events/abc123/links -d '{
+  "user_name": "alice",
+  "links": [
+    {"label": "PagerDuty incident", "url": "https://example.pagerduty.com/incidents/P123"},
+    {"label": "Remediation PR", "url": "https://github.com/example/service/pull/42"}
+  ]
+}'
+```
+
+This creates one immutable `link` annotation. The detail view aggregates original links and later link annotations. Labels are limited to 256 bytes; URLs are limited to 2048 bytes and must be absolute HTTP(S) URLs without credentials or control characters. The server renders links but never fetches them.
+
+**List event activity:**
+
+```bash
+pcr http://localhost:8080/api/v1/events/abc123/activity
+```
+
+**Toggle alert:**
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events/abc123/alert
+```
+
+**Close an active operation:**
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events/abc123/close -d '{
+  "user_name": "release-manager",
+  "description": "Rollout completed and verified"
+}'
+```
+
+The server derives the event type and correlation identifier from the start event and appends an idempotent `phase=end` event.
+
 **List every currently alerted event:**
 
 ```bash
@@ -229,8 +273,9 @@ The `GET /api/v1/events/{id}/annotations` endpoint returns this computed state. 
 | `unstar` | Removes the star from the parent event |
 | `alert` | Opens/activates the parent event's alert state |
 | `clear-alert` | Closes/clears the parent event's alert state |
+| `link` | Appends one or more external references to the parent event |
 
-For an incident-oriented event, `alert` can represent an active incident and `clear-alert` its resolution. This annotation state is independent of the phase-based logical-operation state described below. The API has a dedicated star toggle, but alert transitions are created through the generic `POST /api/v1/events` endpoint.
+For an incident-oriented event, `alert` can represent an active incident and `clear-alert` its resolution. This annotation state is independent of the phase-based logical-operation state described below. Dedicated star, alert, and link endpoints append the corresponding immutable meta-events; the generic create-event endpoint remains available to automation.
 
 ### Open and resolve an alert
 
@@ -296,6 +341,8 @@ Display and visibility tags come from the representative start event:
 
 A tag key may appear at most once on an event. The database enforces this invariant. End events need only `phase`, the matching correlation identifier, and the same event type.
 
+The close endpoint and dashboard action construct that end event automatically. They only accept a correlated start that is still in Current and use a deterministic `external_id`, so concurrent or retried closes do not create duplicate closure events.
+
 ## Idempotency
 
 The API supports an optional `external_id` field on events, which acts as an idempotency key. This allows CI/CD pipelines and automation to safely retry requests without creating duplicate events.
@@ -354,8 +401,10 @@ The built-in HTML dashboard is served at `/`. Authenticate by navigating to `/lo
 - Time range buttons to filter events by predefined windows (last 5 minutes, 30 minutes, 1 hour, and 24 hours)
 - Clickable tags that filter the event list to matching events
 - A star toggle on each event (creates star/unstar meta-events behind the scenes)
-- An Alerts filter and visual highlighting for events whose current alert state is active
-- Event detail page showing the event and its current derived star/alert state
+- Alert/clear-alert controls plus filtering and highlighting for active alerts
+- A repeatable form for appending validated external links
+- A close action for active correlated operations
+- Event detail showing lifecycle state, aggregated links, and chronological activity
 - Auto-refresh at a configurable interval (see `PCR_DASHBOARD_REFRESH_SEC`)
 
 The landing page remains the 24-hour History view. Current and Site-wide are explicit, unbounded views. Alerts combines current alert annotation state with the selected History time range; use the API query shown above when an unbounded list of alerted events is required.
@@ -396,7 +445,7 @@ Events are immutable. There are no update or delete operations. The core `Change
 | `parent_id` | string (optional) | References another event's ID, making this a meta-event |
 | `user_name` | string | Who made the change |
 | `timestamp` | RFC 3339 | When the change happened |
-| `event_type` | string | Category: `deployment`, `feature-flag`, `k8s-change`, or custom. Meta-events use `star`, `unstar`, `alert`, `clear-alert` |
+| `event_type` | string | Category: `deployment`, `feature-flag`, `k8s-change`, or custom. Meta-events use `star`, `unstar`, `alert`, `clear-alert`, `link` |
 | `description` | string | Short summary |
 | `long_description` | string | Detailed description |
 | `links` | array of `{label, url}` | Ordered external references. Labels are optional; URLs must be absolute HTTP(S) URLs |

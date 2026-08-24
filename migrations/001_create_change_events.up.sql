@@ -16,6 +16,14 @@ CREATE INDEX IF NOT EXISTS idx_change_events_user_name ON change_events (user_na
 CREATE INDEX IF NOT EXISTS idx_change_events_parent_id ON change_events (parent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_change_events_external_id ON change_events (external_id) WHERE external_id IS NOT NULL;
 
+CREATE TABLE change_event_links (
+    event_id TEXT    NOT NULL REFERENCES change_events(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    label    TEXT    NOT NULL DEFAULT '',
+    url      TEXT    NOT NULL,
+    PRIMARY KEY (event_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS change_event_tags (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT    NOT NULL REFERENCES change_events(id) ON DELETE CASCADE,

@@ -200,8 +200,8 @@ func TestRunMigrationsCreatesFreshSchema(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
 		t.Fatalf("read migration state: %v", err)
 	}
-	if version != 2 || dirty {
-		t.Errorf("migration state = (version=%d, dirty=%t), want (version=2, dirty=false)", version, dirty)
+	if version != 1 || dirty {
+		t.Errorf("migration state = (version=%d, dirty=%t), want (version=1, dirty=false)", version, dirty)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,9 +132,13 @@ type dashboardData struct {
 
 // detailData is the template data for the detail page.
 type detailData struct {
-	RefreshSec  int
-	Event       *model.ChangeEvent
-	Annotations *model.EventAnnotations
+	RefreshSec     int
+	CSRFToken      string
+	Event          *model.ChangeEvent
+	Annotations    *model.EventAnnotations
+	Links          []model.EventLink
+	Activity       []model.ChangeEvent
+	OperationState string
 }
 
 // quickRanges maps the quick-select range values to durations.
@@ -323,11 +328,31 @@ func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	activity, err := h.svc.GetActivity(r.Context(), id)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "detail get activity error", "error", err, "event_id", id)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	operationState, err := h.svc.OperationState(r.Context(), event)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "detail get operation state error", "error", err, "event_id", id)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	links := slices.Clone(event.Links)
+	for _, annotation := range activity {
+		links = append(links, annotation.Links...)
+	}
 
 	data := detailData{
-		RefreshSec:  0,
-		Event:       event,
-		Annotations: annotations,
+		RefreshSec:     0,
+		CSRFToken:      middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
+		Event:          event,
+		Annotations:    annotations,
+		Links:          links,
+		Activity:       activity,
+		OperationState: operationState,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -339,16 +364,7 @@ func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
 
 // ToggleStar handles POST /events/{id}/star -- posts a meta-event and redirects back.
 func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
-	if !parseBoundedPostForm(w, r) {
-		return
-	}
-
-	// Validate CSRF token from form submission. Body already bounded and
-	// parsed by parseBoundedPostForm above.
-	nonce := middleware.SessionNonce(r)
-	csrfToken := r.PostFormValue("csrf_token")
-	if !middleware.ValidateCSRFToken(h.sessionSecret, nonce, csrfToken) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+	if !h.validateActionForm(w, r) {
 		return
 	}
 
@@ -365,6 +381,80 @@ func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	redirectAfterAction(w, r)
+}
+
+// ToggleAlert appends an alert or clear-alert transition and redirects back.
+func (h *DashboardHandler) ToggleAlert(w http.ResponseWriter, r *http.Request) {
+	if !h.validateActionForm(w, r) {
+		return
+	}
+	_, err := h.svc.ToggleAlert(r.Context(), chi.URLParam(r, "id"), "dashboard-user")
+	if err != nil {
+		h.writeActionError(w, r, err, "toggle alert")
+		return
+	}
+	redirectAfterAction(w, r)
+}
+
+// AddLinks appends one link annotation containing all submitted link rows.
+func (h *DashboardHandler) AddLinks(w http.ResponseWriter, r *http.Request) {
+	if !h.validateActionForm(w, r) {
+		return
+	}
+	links := parseLinkForm(r.PostForm)
+	_, err := h.svc.AddLinks(r.Context(), chi.URLParam(r, "id"), "dashboard-user", links)
+	if err != nil {
+		h.writeActionError(w, r, err, "add links")
+		return
+	}
+	redirectAfterAction(w, r)
+}
+
+// CloseOperation appends a correlated end event and redirects back.
+func (h *DashboardHandler) CloseOperation(w http.ResponseWriter, r *http.Request) {
+	if !h.validateActionForm(w, r) {
+		return
+	}
+	_, err := h.svc.CloseOperation(
+		r.Context(),
+		chi.URLParam(r, "id"),
+		"dashboard-user",
+		r.PostFormValue("description"),
+	)
+	if err != nil {
+		h.writeActionError(w, r, err, "close operation")
+		return
+	}
+	redirectAfterAction(w, r)
+}
+
+func (h *DashboardHandler) validateActionForm(w http.ResponseWriter, r *http.Request) bool {
+	if !parseBoundedPostForm(w, r) {
+		return false
+	}
+	if !middleware.ValidateCSRFToken(h.sessionSecret, middleware.SessionNonce(r), r.PostFormValue("csrf_token")) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func (h *DashboardHandler) writeActionError(w http.ResponseWriter, r *http.Request, err error, action string) {
+	switch {
+	case errors.Is(err, service.ErrEventNotFound):
+		http.Error(w, "Event not found", http.StatusNotFound)
+	case errors.Is(err, service.ErrLinksRequired), errors.Is(err, service.ErrInvalidLink), errors.Is(err, service.ErrOperationNotClosable):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, service.ErrOperationClosed):
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		slog.ErrorContext(r.Context(), "dashboard action error", "action", action, "error", err, "event_id", chi.URLParam(r, "id"))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+func redirectAfterAction(w http.ResponseWriter, r *http.Request) {
 	// localRedirectTarget rejects scheme-relative and backslash-based paths,
 	// including percent-encoded variants after url.Parse decodes them.
 	redirect := localRedirectTarget(r.Header.Get("Referer"))

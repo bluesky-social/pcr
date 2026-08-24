@@ -16,9 +16,10 @@
 
         <dt>Status</dt>
         <dd>
+            {{if .OperationState}}<span class="badge operation-{{.OperationState}}">{{.OperationState}}</span>{{end}}
             {{if .Annotations.Starred}}<span class="star-indicator starred">&#9733; Starred</span>{{end}}
             {{if .Annotations.Alerted}}<span class="alert-indicator">&#9888; Alert</span>{{end}}
-            {{if and (not .Annotations.Starred) (not .Annotations.Alerted)}}&mdash;{{end}}
+            {{if and (not .OperationState) (not .Annotations.Starred) (not .Annotations.Alerted)}}&mdash;{{end}}
         </dd>
 
         <dt>Timestamp</dt>
@@ -37,9 +38,9 @@
 
         <dt>Links</dt>
         <dd>
-            {{if .Event.Links}}
+            {{if .Links}}
             <ul class="event-links">
-                {{range .Event.Links}}<li><a href="{{.URL}}" target="_blank" rel="noreferrer">{{if .Label}}{{.Label}}{{else}}{{.URL}}{{end}}</a></li>{{end}}
+                {{range .Links}}<li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{if .Label}}{{.Label}}{{else}}{{.URL}}{{end}}</a></li>{{end}}
             </ul>
             {{else}}&mdash;{{end}}
         </dd>
@@ -53,5 +54,89 @@
             {{if not .Event.Tags}}&mdash;{{end}}
         </dd>
     </dl>
+
+    <section class="detail-actions" aria-labelledby="event-actions-heading">
+        <h3 id="event-actions-heading">Actions</h3>
+        <div class="action-buttons">
+            <form method="POST" action="/events/{{.Event.ID}}/star">
+                <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+                <button type="submit">{{if .Annotations.Starred}}Unstar{{else}}Star{{end}}</button>
+            </form>
+            <form method="POST" action="/events/{{.Event.ID}}/alert">
+                <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+                <button type="submit" class="{{if .Annotations.Alerted}}button-secondary{{else}}button-alert{{end}}">{{if .Annotations.Alerted}}Clear alert{{else}}Open alert{{end}}</button>
+            </form>
+        </div>
+
+        {{if eq .OperationState "open"}}
+        <form method="POST" action="/events/{{.Event.ID}}/close" class="close-operation-form">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <div class="filter-group">
+                <label for="close-description">Closure note</label>
+                <input id="close-description" name="description" type="text" placeholder="Optional completion summary">
+            </div>
+            <button type="submit" class="button-alert">Close operation</button>
+        </form>
+        {{end}}
+
+        <form method="POST" action="/events/{{.Event.ID}}/links" class="add-links-form">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <fieldset>
+                <legend>Add links</legend>
+                <div id="link-rows" class="link-rows">
+                    <div class="link-row">
+                        <div class="filter-group"><label for="link-label-1">Label</label><input id="link-label-1" name="link_label" type="text" maxlength="256" placeholder="e.g. PagerDuty incident"></div>
+                        <div class="filter-group"><label for="link-url-1">URL</label><input id="link-url-1" name="link_url" type="url" maxlength="2048" required placeholder="https://..."></div>
+                    </div>
+                </div>
+                <template id="link-row-template">
+                    <div class="link-row">
+                        <div class="filter-group"><label>Label</label><input name="link_label" type="text" maxlength="256" placeholder="e.g. Pull request"></div>
+                        <div class="filter-group"><label>URL</label><input name="link_url" type="url" maxlength="2048" required placeholder="https://..."></div>
+                        <button type="button" class="remove-link-row button-secondary">Remove</button>
+                    </div>
+                </template>
+                <div class="action-buttons">
+                    <button type="button" id="add-link-row" class="button-secondary">Add another link</button>
+                    <button type="submit">Save links</button>
+                </div>
+            </fieldset>
+        </form>
+    </section>
+
+    <section class="event-activity" aria-labelledby="event-activity-heading">
+        <h3 id="event-activity-heading">Activity</h3>
+        {{if .Activity}}
+        <ol>
+            {{range .Activity}}
+            <li>
+                <div><span class="badge type-{{.EventType}}">{{.EventType}}</span> {{.Description}}</div>
+                <div class="activity-meta">{{.UserName}} · {{formatTime .Timestamp}}</div>
+                {{if .Links}}<ul class="event-links">{{range .Links}}<li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{if .Label}}{{.Label}}{{else}}{{.URL}}{{end}}</a></li>{{end}}</ul>{{end}}
+            </li>
+            {{end}}
+        </ol>
+        {{else}}<p class="muted-copy">No annotations yet.</p>{{end}}
+    </section>
 </div>
+<script>
+document.getElementById('add-link-row').addEventListener('click', function () {
+    var rows = document.getElementById('link-rows');
+    var fragment = document.getElementById('link-row-template').content.cloneNode(true);
+    var row = fragment.querySelector('.link-row');
+    var position = rows.children.length + 1;
+    var inputs = row.querySelectorAll('input');
+    var labels = row.querySelectorAll('label');
+    inputs[0].id = 'link-label-' + position;
+    inputs[1].id = 'link-url-' + position;
+    labels[0].htmlFor = inputs[0].id;
+    labels[1].htmlFor = inputs[1].id;
+    rows.appendChild(fragment);
+});
+document.getElementById('link-rows').addEventListener('click', function (event) {
+    if (event.target.classList.contains('remove-link-row')) {
+        event.target.closest('.link-row').remove();
+    }
+});
+</script>
 {{end}}

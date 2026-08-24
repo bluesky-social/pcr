@@ -454,7 +454,8 @@ h3 {
 }
 
 .filter-actions button,
-.login-form button {
+.login-form button,
+.detail-actions button {
     min-height: 44px;
     padding: 0.58rem 1.2rem;
     color: var(--deck-black);
@@ -471,7 +472,8 @@ h3 {
 }
 
 .filter-actions button:hover,
-.login-form button:hover {
+.login-form button:hover,
+.detail-actions button:hover {
     filter: brightness(1.15);
     box-shadow: 0 0 18px rgba(124, 255, 114, 0.45);
 }
@@ -764,6 +766,109 @@ h3 {
     white-space: nowrap;
 }
 
+.operation-open {
+    color: var(--deck-black);
+    background: var(--phosphor-green);
+}
+
+.operation-closed {
+    color: var(--console-muted);
+    border-color: rgba(130, 168, 155, 0.35);
+}
+
+.detail-actions,
+.event-activity {
+    margin-top: 1.5rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--seam);
+}
+
+.detail-actions h3,
+.event-activity h3 {
+    margin-bottom: 1rem;
+    color: var(--phosphor-green);
+    font-size: 0.9rem;
+}
+
+.action-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem;
+}
+
+.detail-actions .button-secondary {
+    color: var(--phosphor-text);
+    border: 1px solid var(--seam);
+    background: rgba(7, 17, 14, 0.78);
+}
+
+.detail-actions .button-alert {
+    color: var(--deck-black);
+    background: var(--alarm-red);
+}
+
+.close-operation-form,
+.add-links-form {
+    margin-top: 1rem;
+    padding: 1rem;
+    border: 1px solid var(--seam-soft);
+    background: rgba(7, 17, 14, 0.48);
+}
+
+.close-operation-form {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.75rem;
+}
+
+.add-links-form fieldset {
+    border: 0;
+}
+
+.add-links-form legend {
+    margin-bottom: 0.75rem;
+    color: var(--phosphor-text);
+    font-family: "Orbitron", sans-serif;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+}
+
+.link-rows {
+    display: grid;
+    gap: 0.65rem;
+    margin-bottom: 0.75rem;
+}
+
+.link-row {
+    display: grid;
+    grid-template-columns: minmax(10rem, 0.7fr) minmax(16rem, 1.3fr) auto;
+    gap: 0.65rem;
+}
+
+.remove-link-row {
+    align-self: end;
+}
+
+.event-activity ol {
+    display: grid;
+    gap: 0.65rem;
+    list-style: none;
+}
+
+.event-activity ol > li {
+    padding: 0.8rem;
+    border-left: 2px solid var(--seam);
+    background: rgba(7, 17, 14, 0.55);
+}
+
+.activity-meta,
+.muted-copy {
+    margin-top: 0.3rem;
+    color: var(--console-muted);
+    font-family: "Share Tech Mono", monospace;
+    font-size: 0.72rem;
+}
+
 .star-indicator.starred {
     color: var(--signal-cyan);
     text-shadow: 0 0 9px rgba(107, 231, 255, 0.5);
@@ -901,6 +1006,15 @@ h3 {
 
     .detail-list {
         grid-template-columns: 1fr;
+    }
+
+    .link-row {
+        grid-template-columns: 1fr;
+    }
+
+    .close-operation-form {
+        align-items: stretch;
+        flex-direction: column;
     }
 
     .detail-list dt {

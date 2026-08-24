@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/sarah/go-prod-change-registry/internal/model"
@@ -14,11 +18,14 @@ import (
 )
 
 var (
-	ErrUserNameRequired  = errors.New("user_name is required")
-	ErrEventTypeRequired = errors.New("event_type is required")
-	ErrInvalidLink       = errors.New("links must use absolute http or https URLs")
-	ErrEventNotFound     = errors.New("event not found")
-	ErrParentNotFound    = errors.New("parent event not found")
+	ErrUserNameRequired     = errors.New("user_name is required")
+	ErrEventTypeRequired    = errors.New("event_type is required")
+	ErrInvalidLink          = errors.New("links must have safe labels and absolute http or https URLs without credentials")
+	ErrLinksRequired        = errors.New("at least one link is required")
+	ErrEventNotFound        = errors.New("event not found")
+	ErrParentNotFound       = errors.New("parent event not found")
+	ErrOperationNotClosable = errors.New("event is not a correlated operation start")
+	ErrOperationClosed      = errors.New("operation is already closed")
 )
 
 type ChangeService struct {
@@ -36,11 +43,8 @@ func (s *ChangeService) Create(ctx context.Context, req *model.CreateChangeReque
 	if req.EventType == "" {
 		return nil, ErrEventTypeRequired
 	}
-	for _, link := range req.Links {
-		parsed, err := url.Parse(link.URL)
-		if err != nil || link.URL != strings.TrimSpace(link.URL) || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return nil, ErrInvalidLink
-		}
+	if err := validateLinks(req.Links); err != nil {
+		return nil, err
 	}
 
 	// If this is a meta-event, verify the parent exists.
@@ -86,6 +90,35 @@ func (s *ChangeService) Create(ctx context.Context, req *model.CreateChangeReque
 	return created, err
 }
 
+const (
+	maxLinkLabelBytes = 256
+	maxLinkURLBytes   = 2048
+)
+
+func validateLinks(links []model.EventLink) error {
+	for _, link := range links {
+		if len(link.Label) > maxLinkLabelBytes || strings.IndexFunc(link.Label, isUnsafeLinkRune) >= 0 {
+			return ErrInvalidLink
+		}
+		if link.URL == "" || len(link.URL) > maxLinkURLBytes || link.URL != strings.TrimSpace(link.URL) || strings.Contains(link.URL, "\\") || strings.IndexFunc(link.URL, unicode.IsSpace) >= 0 {
+			return ErrInvalidLink
+		}
+		parsed, err := url.ParseRequestURI(link.URL)
+		if err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return ErrInvalidLink
+		}
+		unescaped, err := url.PathUnescape(link.URL)
+		if err != nil || strings.Contains(unescaped, "\\") || strings.IndexFunc(unescaped, isUnsafeLinkRune) >= 0 {
+			return ErrInvalidLink
+		}
+	}
+	return nil
+}
+
+func isUnsafeLinkRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
+}
+
 func (s *ChangeService) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
 	event, err := s.store.GetByID(ctx, id)
 	if err != nil {
@@ -116,9 +149,159 @@ func (s *ChangeService) GetAnnotationsBatch(ctx context.Context, eventIDs []stri
 	return s.store.GetAnnotationsBatch(ctx, eventIDs)
 }
 
+// AddLinks appends an immutable link annotation to an existing event.
+func (s *ChangeService) AddLinks(ctx context.Context, eventID, userName string, links []model.EventLink) (*model.ChangeEvent, error) {
+	if len(links) == 0 {
+		return nil, ErrLinksRequired
+	}
+	return s.Create(ctx, &model.CreateChangeRequest{
+		ParentID:    eventID,
+		UserName:    userName,
+		EventType:   model.EventTypeLink,
+		Description: "added external links",
+		Links:       links,
+	})
+}
+
+// GetActivity returns all child annotations for an event in chronological order.
+func (s *ChangeService) GetActivity(ctx context.Context, eventID string) ([]model.ChangeEvent, error) {
+	parent, err := s.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	activity, err := s.listAll(ctx, model.ListParams{ParentID: eventID})
+	if err != nil {
+		return nil, err
+	}
+	if key, value, ok := operationIdentity(parent); ok {
+		closures, err := s.listAll(ctx, model.ListParams{
+			EventType: parent.EventType,
+			TopLevel:  true,
+			Tags:      map[string]string{key: value, "phase": "end"},
+		})
+		if err != nil {
+			return nil, err
+		}
+		activity = append(activity, closures...)
+	}
+	slices.SortFunc(activity, func(a, b model.ChangeEvent) int {
+		if order := a.Timestamp.Compare(b.Timestamp); order != 0 {
+			return order
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return activity, nil
+}
+
+func (s *ChangeService) listAll(ctx context.Context, params model.ListParams) ([]model.ChangeEvent, error) {
+	params.Limit = model.MaxLimit
+	events := make([]model.ChangeEvent, 0)
+	for {
+		result, err := s.List(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, result.Events...)
+		if len(result.Events) == 0 || params.Offset+len(result.Events) >= result.TotalCount {
+			return events, nil
+		}
+		params.Offset += len(result.Events)
+	}
+}
+
+// OperationState returns open or closed for a correlated start event. Events
+// that do not represent a closable operation have no lifecycle state.
+func (s *ChangeService) OperationState(ctx context.Context, event *model.ChangeEvent) (string, error) {
+	key, value, ok := operationIdentity(event)
+	if !ok {
+		return "", nil
+	}
+	result, err := s.ListCurrent(ctx, model.CurrentParams{
+		EventType:        event.EventType,
+		CorrelationKey:   key,
+		CorrelationValue: value,
+		Limit:            1,
+	})
+	if err != nil {
+		return "", err
+	}
+	if result.TotalCount > 0 {
+		return model.OperationStateOpen, nil
+	}
+	return model.OperationStateClosed, nil
+}
+
+// CloseOperation appends an idempotent end event for a correlated start.
+func (s *ChangeService) CloseOperation(ctx context.Context, eventID, userName, description string) (*model.ChangeEvent, error) {
+	if userName == "" {
+		return nil, ErrUserNameRequired
+	}
+	start, err := s.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	key, value, ok := operationIdentity(start)
+	if !ok {
+		return nil, ErrOperationNotClosable
+	}
+	state, err := s.OperationState(ctx, start)
+	if err != nil {
+		return nil, err
+	}
+	if state != model.OperationStateOpen {
+		return nil, ErrOperationClosed
+	}
+
+	description = strings.TrimSpace(description)
+	if description == "" {
+		description = start.Description + " completed"
+	}
+	tags := maps.Clone(start.Tags)
+	tags[key] = value
+	tags["phase"] = "end"
+	created, err := s.Create(ctx, &model.CreateChangeRequest{
+		ExternalID:  operationCloseExternalID(start.EventType, key, value),
+		UserName:    userName,
+		EventType:   start.EventType,
+		Description: description,
+		Tags:        tags,
+	})
+	if errors.Is(err, store.ErrDuplicate) {
+		return created, nil
+	}
+	return created, err
+}
+
+func operationCloseExternalID(eventType, correlationKey, correlationValue string) string {
+	payload := eventType + "\x00" + correlationKey + "\x00" + correlationValue
+	return fmt.Sprintf("pcr:close:%x", sha256.Sum256([]byte(payload)))
+}
+
+func operationIdentity(event *model.ChangeEvent) (string, string, bool) {
+	if event == nil || event.ParentID != "" || event.Tags["phase"] != "start" {
+		return "", "", false
+	}
+	if value := event.Tags["change_id"]; value != "" {
+		return "change_id", value, true
+	}
+	if value := event.Tags["deploy_id"]; value != "" {
+		return "deploy_id", value, true
+	}
+	return "", "", false
+}
+
 // ToggleStar creates a star or unstar meta-event for the given event.
 func (s *ChangeService) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
 	event, err := s.store.ToggleStar(ctx, eventID, userName)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrEventNotFound
+	}
+	return event, err
+}
+
+// ToggleAlert creates an alert or clear-alert meta-event for the given event.
+func (s *ChangeService) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	event, err := s.store.ToggleAlert(ctx, eventID, userName)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrEventNotFound
 	}

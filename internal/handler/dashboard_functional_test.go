@@ -143,6 +143,71 @@ func TestSeededDashboardViews(t *testing.T) {
 		t.Error("Alerts table does not contain the actively alerted history event")
 	}
 
+	var activeEventID string
+	for _, event := range currentResult.Events {
+		if event.ExternalID == "demo-payments-sev1-start" {
+			activeEventID = event.ID
+			break
+		}
+	}
+	if activeEventID == "" {
+		t.Fatal("active fixture event for action workflow not found")
+	}
+	openDetail := renderDashboard(t, r, "/events/"+activeEventID)
+	if !strings.Contains(openDetail, `action="/events/`+activeEventID+`/close"`) || !strings.Contains(openDetail, ">open<") {
+		t.Error("active event detail does not expose its close action and open state")
+	}
+	for _, want := range []string{"Key rotation runbook", "Change plan PR", "added external links"} {
+		if !strings.Contains(openDetail, want) {
+			t.Errorf("seeded active event detail does not contain %q", want)
+		}
+	}
+
+	linksResponse := performAPIRequest(t, r, http.MethodPost, "/api/v1/events/"+activeEventID+"/links", `{
+		"user_name":"on-call",
+		"links":[
+			{"label":"Rotation plan","url":"https://notion.so/example/rotation-plan"},
+			{"label":"Implementation PR","url":"https://github.com/example/card-vault/pull/77"},
+			{"label":"<img src=x onerror=alert(1)>","url":"https://example.com/safe-target"}
+		]
+	}`)
+	if linksResponse.Code != http.StatusCreated {
+		t.Fatalf("append links status = %d, body = %s", linksResponse.Code, linksResponse.Body.String())
+	}
+	alertResponse := performAPIRequest(t, r, http.MethodPost, "/api/v1/events/"+activeEventID+"/alert", "")
+	if alertResponse.Code != http.StatusCreated {
+		t.Fatalf("toggle alert status = %d, body = %s", alertResponse.Code, alertResponse.Body.String())
+	}
+	actionDetail := renderDashboard(t, r, "/events/"+activeEventID)
+	for _, want := range []string{"Rotation plan", "Implementation PR", "Activity", "Clear alert"} {
+		if !strings.Contains(actionDetail, want) {
+			t.Errorf("action detail does not contain %q", want)
+		}
+	}
+	if strings.Contains(actionDetail, `<img src=x onerror=alert(1)>`) || !strings.Contains(actionDetail, `&lt;img src=x onerror=alert(1)&gt;`) {
+		t.Error("link label markup was not safely escaped")
+	}
+
+	closeResponse := performAPIRequest(t, r, http.MethodPost, "/api/v1/events/"+activeEventID+"/close", `{
+		"user_name":"release-manager",
+		"description":"Key rotation completed and verified"
+	}`)
+	if closeResponse.Code != http.StatusCreated {
+		t.Fatalf("close operation status = %d, body = %s", closeResponse.Code, closeResponse.Body.String())
+	}
+	closedDetail := renderDashboard(t, r, "/events/"+activeEventID)
+	if !strings.Contains(closedDetail, ">closed<") || !strings.Contains(closedDetail, "Key rotation completed and verified") || strings.Contains(closedDetail, `action="/events/`+activeEventID+`/close"`) {
+		t.Error("closed event detail has the wrong lifecycle state or still offers close")
+	}
+	currentAfterClose := performAPIRequest(t, r, http.MethodGet, "/api/v1/current?for_team=payments", "")
+	var reducedAfterClose model.ListResult
+	if err := json.NewDecoder(currentAfterClose.Body).Decode(&reducedAfterClose); err != nil {
+		t.Fatalf("decode current after close: %v", err)
+	}
+	if currentAfterClose.Code != http.StatusOK || reducedAfterClose.TotalCount != currentResult.TotalCount-1 {
+		t.Errorf("current after close = status %d total %d, want 200 and %d", currentAfterClose.Code, reducedAfterClose.TotalCount, currentResult.TotalCount-1)
+	}
+
 	fontRequest := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/fonts/Orbitron-Variable.ttf", nil)
 	fontResponse := httptest.NewRecorder()
 	r.ServeHTTP(fontResponse, fontRequest)
@@ -172,7 +237,7 @@ func seededDashboardRouter(t *testing.T) http.Handler {
 			t.Errorf("close database: %v", err)
 		}
 	})
-	for _, name := range []string{"001_create_change_events.up.sql", "002_create_change_event_links.up.sql"} {
+	for _, name := range []string{"001_create_change_events.up.sql"} {
 		migration, err := fs.ReadFile(migrations.FS, name)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -221,6 +286,18 @@ func renderDashboard(t *testing.T, handler http.Handler, path string) string {
 		t.Fatalf("GET %s status = %d; body = %s", path, response.Code, response.Body.String())
 	}
 	return response.Body.String()
+}
+
+func performAPIRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequestWithContext(t.Context(), method, path, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer demo-token")
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
 
 func dashboardTableBody(t *testing.T, page string) string {

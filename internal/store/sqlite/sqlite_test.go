@@ -31,7 +31,6 @@ func applyTestMigrations(t *testing.T, db *sql.DB) {
 	ctx := t.Context()
 	migrationFiles := []string{
 		"001_create_change_events.up.sql",
-		"002_create_change_event_links.up.sql",
 	}
 	for _, name := range migrationFiles {
 		sqlBytes, err := fs.ReadFile(migrations.FS, name)
@@ -395,6 +394,38 @@ func TestToggleStarIsAtomic(t *testing.T) {
 	}
 	if !annotations.Starred {
 		t.Fatal("odd number of toggles left event unstarred")
+	}
+}
+
+func TestToggleAlertAppendsOppositeTransitions(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	parent := makeEvent("toggle-alert-parent", "alice", model.EventTypeDeployment, time.Now().UTC(), nil)
+	if _, err := s.Create(t.Context(), parent); err != nil {
+		t.Fatalf("Create(parent) error = %v", err)
+	}
+
+	opened, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	if err != nil {
+		t.Fatalf("first ToggleAlert() error = %v", err)
+	}
+	if opened.EventType != model.EventTypeAlert || opened.ParentID != parent.ID {
+		t.Errorf("first transition = %+v", opened)
+	}
+	cleared, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	if err != nil {
+		t.Fatalf("second ToggleAlert() error = %v", err)
+	}
+	if cleared.EventType != model.EventTypeClearAlert {
+		t.Errorf("second transition type = %q, want %q", cleared.EventType, model.EventTypeClearAlert)
+	}
+	annotations, err := s.GetAnnotations(t.Context(), parent.ID)
+	if err != nil {
+		t.Fatalf("GetAnnotations() error = %v", err)
+	}
+	if annotations.Alerted {
+		t.Fatal("two alert toggles left event alerted")
 	}
 }
 
@@ -952,6 +983,34 @@ func TestList(t *testing.T) {
 	})
 }
 
+func TestListByParentID(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ts := mustTime(t, "2026-08-24T12:00:00Z")
+	parent := makeEvent("parent", "alice", model.EventTypeDeployment, ts, nil)
+	child := makeEvent("child", "bob", model.EventTypeLink, ts.Add(time.Minute), nil)
+	child.ParentID = parent.ID
+	child.Links = []model.EventLink{{Label: "Plan", URL: "https://notion.so/example/plan"}}
+	other := makeEvent("other", "carol", model.EventTypeLink, ts.Add(2*time.Minute), nil)
+	for _, event := range []*model.ChangeEvent{parent, child, other} {
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(%s): %v", event.ID, err)
+		}
+	}
+
+	result, err := s.List(t.Context(), model.ListParams{ParentID: parent.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if result.TotalCount != 1 || len(result.Events) != 1 || result.Events[0].ID != child.ID {
+		t.Fatalf("List() = %+v, want child only", result)
+	}
+	if len(result.Events[0].Links) != 1 || result.Events[0].Links[0].Label != "Plan" {
+		t.Errorf("child links = %#v", result.Events[0].Links)
+	}
+}
+
 func TestListCurrent(t *testing.T) {
 	t.Parallel()
 
@@ -1086,6 +1145,31 @@ func TestListCurrent(t *testing.T) {
 			t.Errorf("second.TotalCount = %d, want 3", second.TotalCount)
 		}
 	})
+}
+
+func TestListCurrentByCorrelation(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	base := mustTime(t, "2026-08-24T12:00:00Z")
+	for _, event := range []*model.ChangeEvent{
+		makeEvent("wanted", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "wanted-id"}),
+		makeEvent("other", "bob", "deployment", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "other-id"}),
+	} {
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(%s): %v", event.ID, err)
+		}
+	}
+	result, err := s.ListCurrent(t.Context(), model.CurrentParams{
+		EventType:        "deployment",
+		CorrelationKey:   "change_id",
+		CorrelationValue: "wanted-id",
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("ListCurrent() error = %v", err)
+	}
+	assertEventIDs(t, result.Events, []string{"wanted"})
 }
 
 func createCurrentFixtures(t *testing.T, s *sqlite.Store, events ...*model.ChangeEvent) {

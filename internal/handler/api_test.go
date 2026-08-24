@@ -22,6 +22,7 @@ import (
 type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
 	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
+	toggleAlertFn         func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
 	listCurrentFn         func(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
@@ -44,6 +45,13 @@ func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*
 		return m.toggleStarFn(ctx, eventID, userName)
 	}
 	panic("unexpected call to ToggleStar")
+}
+
+func (m *mockStore) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	if m.toggleAlertFn != nil {
+		return m.toggleAlertFn(ctx, eventID, userName)
+	}
+	panic("unexpected call to ToggleAlert")
 }
 
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
@@ -114,7 +122,11 @@ func newTestStack() *testStack {
 	r.Get("/api/v1/current", h.ListCurrent)
 	r.Get("/api/v1/events/{id}", h.GetEvent)
 	r.Get("/api/v1/events/{id}/annotations", h.GetEventAnnotations)
+	r.Get("/api/v1/events/{id}/activity", h.GetEventActivity)
+	r.Post("/api/v1/events/{id}/links", h.AddEventLinks)
 	r.Post("/api/v1/events/{id}/star", h.ToggleStar)
+	r.Post("/api/v1/events/{id}/alert", h.ToggleAlert)
+	r.Post("/api/v1/events/{id}/close", h.CloseOperation)
 
 	return &testStack{
 		store:   ms,
@@ -854,6 +866,88 @@ func TestToggleStar(t *testing.T) {
 		}
 		if errObj["code"] != "not_found" {
 			t.Fatalf("expected error code not_found, got %v", errObj["code"])
+		}
+	})
+}
+
+func TestEventActionEndpoints(t *testing.T) {
+	t.Parallel()
+
+	t.Run("append links", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "event-1"}, nil
+		}
+		ts.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			return event, nil
+		}
+		body := `{"user_name":"alice","links":[{"label":"Plan","url":"https://notion.so/example/plan"},{"label":"PR","url":"https://github.com/example/repo/pull/1"}]}`
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/event-1/links", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var event model.ChangeEvent
+		if err := json.NewDecoder(rec.Body).Decode(&event); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if event.ParentID != "event-1" || event.EventType != model.EventTypeLink || len(event.Links) != 2 {
+			t.Errorf("link annotation = %+v", event)
+		}
+	})
+
+	t.Run("list activity", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "event-1"}, nil
+		}
+		ts.store.listFn = func(_ context.Context, params model.ListParams) (*model.ListResult, error) {
+			return &model.ListResult{Events: []model.ChangeEvent{{ID: "link-1", ParentID: params.ParentID}}}, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/events/event-1/activity", nil)
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"link-1"`) {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("toggle alert", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.toggleAlertFn = func(_ context.Context, eventID, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "alert-1", ParentID: eventID, EventType: model.EventTypeAlert}, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/event-1/alert", nil)
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"event_type":"alert"`) {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("close operation", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		start := &model.ChangeEvent{ID: "start-1", EventType: "deployment", Tags: map[string]string{"phase": "start", "change_id": "change-1"}}
+		ts.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) { return start, nil }
+		ts.store.listCurrentFn = func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+			return &model.ListResult{TotalCount: 1}, nil
+		}
+		ts.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) { return event, nil }
+		body := `{"user_name":"alice","description":"rollout complete"}`
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/start-1/close", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"phase":"end"`) {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
 	})
 }

@@ -46,6 +46,9 @@ type dashboardStack struct {
 
 func newDashboardTestStack() *dashboardStack {
 	ms := &mockStore{
+		listFn: func(_ context.Context, params model.ListParams) (*model.ListResult, error) {
+			return &model.ListResult{Events: []model.ChangeEvent{}, Limit: params.EffectiveLimit()}, nil
+		},
 		listCurrentFn: func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
 			return &model.ListResult{
 				Events:     []model.ChangeEvent{},
@@ -62,6 +65,9 @@ func newDashboardTestStack() *dashboardStack {
 	r.Get("/", h.Dashboard)
 	r.Get("/events/{id}", h.Detail)
 	r.Post("/events/{id}/star", h.ToggleStar)
+	r.Post("/events/{id}/alert", h.ToggleAlert)
+	r.Post("/events/{id}/links", h.AddLinks)
+	r.Post("/events/{id}/close", h.CloseOperation)
 
 	return &dashboardStack{
 		store:   ms,
@@ -75,6 +81,10 @@ func newDashboardTestStack() *dashboardStack {
 // The CSRF token is written into the request body as application/x-www-form-urlencoded
 // so it survives ParseForm -- mirroring how real browsers submit dashboard forms.
 func addCSRFToRequest(t *testing.T, req *http.Request) {
+	addCSRFFormToRequest(t, req, url.Values{})
+}
+
+func addCSRFFormToRequest(t *testing.T, req *http.Request, values url.Values) {
 	t.Helper()
 	opts := middleware.SessionOptions{Secret: dashboardSessionSecret}
 	rec := httptest.NewRecorder()
@@ -87,7 +97,8 @@ func addCSRFToRequest(t *testing.T, req *http.Request) {
 	parts := strings.SplitN(nonce, ":", 3)
 	csrfToken := middleware.GenerateCSRFToken(dashboardSessionSecret, parts[0])
 
-	body := url.Values{"csrf_token": {csrfToken}}.Encode()
+	values.Set("csrf_token", csrfToken)
+	body := values.Encode()
 	req.Body = io.NopCloser(strings.NewReader(body))
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -623,6 +634,7 @@ func TestDetail(t *testing.T) {
 					UserName:    "bob",
 					EventType:   "feature-flag",
 					Description: "enabled dark-mode flag",
+					Links:       []model.EventLink{{Label: "Original plan", URL: "https://notion.so/example/original"}},
 					Timestamp:   now,
 					CreatedAt:   now,
 				}, nil
@@ -631,6 +643,17 @@ func TestDetail(t *testing.T) {
 		}
 		ds.store.getAnnotationsFn = func(_ context.Context, _ string) (*model.EventAnnotations, error) {
 			return &model.EventAnnotations{Starred: true, Alerted: false}, nil
+		}
+		ds.store.listFn = func(_ context.Context, params model.ListParams) (*model.ListResult, error) {
+			return &model.ListResult{Events: []model.ChangeEvent{{
+				ID:          "link-note-1",
+				ParentID:    params.ParentID,
+				UserName:    "alice",
+				EventType:   model.EventTypeLink,
+				Description: "added external links",
+				Links:       []model.EventLink{{Label: "Incident", URL: "https://example.pagerduty.com/incidents/P1"}},
+				Timestamp:   now.Add(time.Minute),
+			}}, TotalCount: 1}, nil
 		}
 
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/events/evt-detail-001", nil)
@@ -650,6 +673,11 @@ func TestDetail(t *testing.T) {
 			"bob",
 			"feature-flag",
 			"Starred",
+			"Original plan",
+			"Incident",
+			"Activity",
+			`action="/events/evt-detail-001/links"`,
+			`action="/events/evt-detail-001/alert"`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("expected body to contain %q", want)
@@ -691,6 +719,92 @@ func TestDetail(t *testing.T) {
 		}
 		if strings.Contains(rec.Body.String(), "disk I/O error") {
 			t.Error("internal error message leaked to response body")
+		}
+	})
+}
+
+func TestDashboardEventActions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("adds multiple links", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		ds.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "event-1"}, nil
+		}
+		var annotation *model.ChangeEvent
+		ds.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			annotation = event
+			return event, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events/event-1/links", nil)
+		req.Header.Set("Referer", "/events/event-1")
+		addCSRFFormToRequest(t, req, url.Values{
+			"link_label": {"Plan", "PR"},
+			"link_url":   {"https://notion.so/example/plan", "https://github.com/example/repo/pull/1"},
+		})
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if annotation == nil || len(annotation.Links) != 2 || annotation.Links[1].Label != "PR" {
+			t.Errorf("annotation = %+v", annotation)
+		}
+	})
+
+	t.Run("rejects unsafe link", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		ds.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "event-1"}, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events/event-1/links", nil)
+		addCSRFFormToRequest(t, req, url.Values{
+			"link_label": {"deceptive"},
+			"link_url":   {"https://trusted.example@evil.example/path"},
+		})
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("toggles alert", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		ds.store.toggleAlertFn = func(_ context.Context, eventID, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ParentID: eventID, EventType: model.EventTypeAlert}, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events/event-1/alert", nil)
+		addCSRFToRequest(t, req)
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("closes operation", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		start := &model.ChangeEvent{ID: "start-1", EventType: "deployment", Tags: map[string]string{"phase": "start", "change_id": "change-1"}}
+		ds.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) { return start, nil }
+		ds.store.listCurrentFn = func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+			return &model.ListResult{TotalCount: 1}, nil
+		}
+		ds.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) { return event, nil }
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events/start-1/close", nil)
+		addCSRFFormToRequest(t, req, url.Values{"description": {"completed after checks"}})
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
 	})
 }

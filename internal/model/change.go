@@ -13,6 +13,13 @@ const (
 	EventTypeUnstar     = "unstar"
 	EventTypeAlert      = "alert"
 	EventTypeClearAlert = "clear-alert"
+	EventTypeLink       = "link"
+)
+
+// Derived logical-operation states.
+const (
+	OperationStateOpen   = "open"
+	OperationStateClosed = "closed"
 )
 
 // ChangeEvent represents a single production change or meta-event recorded in the registry.
@@ -45,6 +52,7 @@ func (e ChangeEvent) IsMetaEvent() bool {
 
 // ListParams holds the filtering and pagination parameters for listing change events.
 type ListParams struct {
+	ParentID    string            `json:"parent_id,omitempty"`
 	StartAfter  *time.Time        `json:"start_after,omitempty"`
 	StartBefore *time.Time        `json:"start_before,omitempty"`
 	Around      *time.Time        `json:"around,omitempty"`
@@ -60,12 +68,14 @@ type ListParams struct {
 
 // CurrentParams holds filtering and pagination parameters for active logical operations.
 type CurrentParams struct {
-	ForTeam    string   `json:"for_team,omitempty"`
-	Scopes     []string `json:"scopes,omitempty"`
-	Severities []string `json:"severities,omitempty"`
-	EventType  string   `json:"event_type,omitempty"`
-	Limit      int      `json:"limit"`
-	Offset     int      `json:"offset"`
+	ForTeam          string   `json:"for_team,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	Severities       []string `json:"severities,omitempty"`
+	EventType        string   `json:"event_type,omitempty"`
+	CorrelationKey   string   `json:"-"`
+	CorrelationValue string   `json:"-"`
+	Limit            int      `json:"limit"`
+	Offset           int      `json:"offset"`
 }
 
 // DefaultLimit is the default number of results returned by the API.
@@ -117,6 +127,18 @@ type CreateChangeRequest struct {
 	LongDescription string            `json:"long_description,omitempty"`
 	Links           []EventLink       `json:"links,omitempty"`
 	Tags            map[string]string `json:"tags,omitempty"`
+}
+
+// AddLinksRequest appends external references to an existing event.
+type AddLinksRequest struct {
+	UserName string      `json:"user_name"`
+	Links    []EventLink `json:"links"`
+}
+
+// CloseOperationRequest appends an end event for an active operation.
+type CloseOperationRequest struct {
+	UserName    string `json:"user_name"`
+	Description string `json:"description,omitempty"`
 }
 
 // EventAnnotations holds the derived annotation state for an event.

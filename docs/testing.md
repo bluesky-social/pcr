@@ -28,7 +28,14 @@ Run the seeded real-SQLite dashboard functional test:
 go test -tags=integration ./internal/handler -run TestSeededDashboardViews
 ```
 
-It loads `testdata/functional/phosphor-demo.json`, exercises Current, Site-wide, History, Alerts, lifecycle reduction, annotations, the severity banner, and locally embedded font delivery through the real router.
+It loads `testdata/functional/phosphor-demo.json` and exercises Current, Site-wide, History, Alerts, lifecycle reduction, link annotations, alert toggling, operation closure, safely escaped link labels, the activity trail, the severity banner, and locally embedded font delivery through the real router.
+
+Fuzz the repeated link form fields and link security validator:
+
+```bash
+go test -run='^$' -fuzz=FuzzParseLinkForm -fuzztime=10s ./internal/handler
+go test -run='^$' -fuzz=FuzzValidateLinks -fuzztime=10s ./internal/service
+```
 
 To test an already-running server, including the Docker Compose service:
 

@@ -3,6 +3,10 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/sarah/go-prod-change-registry/internal/model"
 )
 
 // maxFormBytes bounds POST form bodies handled by this package. The
@@ -27,4 +31,22 @@ func parseBoundedPostForm(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func parseLinkForm(form url.Values) []model.EventLink {
+	labels := form["link_label"]
+	urls := form["link_url"]
+	links := make([]model.EventLink, 0, len(urls))
+	for i, rawURL := range urls {
+		linkURL := strings.TrimSpace(rawURL)
+		label := ""
+		if i < len(labels) {
+			label = strings.TrimSpace(labels[i])
+		}
+		if linkURL == "" && label == "" {
+			continue
+		}
+		links = append(links, model.EventLink{Label: label, URL: linkURL})
+	}
+	return links
 }

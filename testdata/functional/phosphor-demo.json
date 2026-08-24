@@ -87,6 +87,19 @@
       }
     },
     {
+      "ref": "payments_active_sev1_links",
+      "parent_ref": "payments_active_sev1",
+      "external_id": "demo-payments-sev1-links",
+      "user_name": "nora.singh",
+      "timestamp_offset": "-1h28m",
+      "event_type": "link",
+      "description": "added external links",
+      "links": [
+        {"label": "Key rotation runbook", "url": "https://notion.so/example/key-rotation-runbook"},
+        {"label": "Change plan PR", "url": "https://github.com/example/card-vault/pull/71"}
+      ]
+    },
+    {
       "ref": "payments_completed_start",
       "external_id": "demo-payments-completed-start",
       "user_name": "deploy-bot",
