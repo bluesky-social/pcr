@@ -123,6 +123,25 @@ func (h *APIHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(ctx, w, http.StatusOK, result)
 }
 
+// ListCurrent returns active logical operations derived from start and end phase events.
+func (h *APIHandler) ListCurrent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	params, paramErr := parseCurrentParams(r.URL.Query())
+	if paramErr != nil {
+		writeError(ctx, w, http.StatusBadRequest, paramErr.code, paramErr.message)
+		return
+	}
+
+	result, err := h.svc.ListCurrent(ctx, params)
+	if err != nil {
+		slog.ErrorContext(ctx, "list current events error", "error", err)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+		return
+	}
+
+	writeJSON(ctx, w, http.StatusOK, result)
+}
+
 func (h *APIHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	ctx := r.Context()
@@ -146,6 +165,8 @@ func mapServiceError(ctx context.Context, w http.ResponseWriter, err error) {
 		writeError(ctx, w, http.StatusBadRequest, "validation_error", "user_name is required")
 	case errors.Is(err, service.ErrEventTypeRequired):
 		writeError(ctx, w, http.StatusBadRequest, "validation_error", "event_type is required")
+	case errors.Is(err, service.ErrInvalidLink):
+		writeError(ctx, w, http.StatusBadRequest, "validation_error", err.Error())
 	case errors.Is(err, service.ErrEventNotFound):
 		writeError(ctx, w, http.StatusNotFound, "not_found", "event not found")
 	case errors.Is(err, service.ErrParentNotFound):

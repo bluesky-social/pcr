@@ -51,6 +51,14 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 			q.Set("tag", key+":"+value)
 			return "/?" + q.Encode()
 		},
+		"tagValue": func(tags map[string]string, key string) string {
+			return tags[key]
+		},
+		"formatElapsed": formatElapsed,
+		"dashboardViewURL": func(view, team string) string {
+			return dashboardURL(view, team, "")
+		},
+		"dashboardRangeURL": dashboardURL,
 	}
 
 	// Parse each page template separately with the shared layout
@@ -81,6 +89,8 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 
 // dashboardFilters holds the current filter values for re-populating the form.
 type dashboardFilters struct {
+	View        string
+	Team        string
 	Range       string
 	StartAfter  string
 	StartBefore string
@@ -88,6 +98,8 @@ type dashboardFilters struct {
 	UserName    string
 	Alerted     bool
 	Tags        []string
+	Scopes      []string
+	Severities  []string
 }
 
 // dashboardEvent wraps a ChangeEvent with its derived annotation state.
@@ -99,19 +111,22 @@ type dashboardEvent struct {
 
 // dashboardData is the template data for the dashboard page.
 type dashboardData struct {
-	RefreshSec  int
-	CSRFToken   string
-	Events      []dashboardEvent
-	Filters     dashboardFilters
-	TotalCount  int
-	Limit       int
-	Offset      int
-	HasPrev     bool
-	HasNext     bool
-	PrevURL     string
-	NextURL     string
-	OffsetStart int
-	OffsetEnd   int
+	RefreshSec   int
+	CSRFToken    string
+	Events       []dashboardEvent
+	BannerEvents []model.ChangeEvent
+	BannerTotal  int
+	BannerURL    string
+	Filters      dashboardFilters
+	TotalCount   int
+	Limit        int
+	Offset       int
+	HasPrev      bool
+	HasNext      bool
+	PrevURL      string
+	NextURL      string
+	OffsetStart  int
+	OffsetEnd    int
 }
 
 // detailData is the template data for the detail page.
@@ -129,13 +144,25 @@ var quickRanges = map[string]time.Duration{
 	"24h": 24 * time.Hour,
 }
 
+const dashboardBannerLimit = 20
+
 // Dashboard handles GET / and renders the event list.
 func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	params, filters := parseDashboardRequest(r)
 
-	result, err := h.svc.List(r.Context(), params)
+	result, err := h.listDashboardEvents(r.Context(), params, filters)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "dashboard list events error", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	banner, err := h.svc.ListCurrent(r.Context(), model.CurrentParams{
+		ForTeam:    filters.Team,
+		Severities: []string{"sev0", "sev1"},
+		Limit:      dashboardBannerLimit,
+	})
+	if err != nil {
+		slog.ErrorContext(r.Context(), "dashboard list high-severity events error", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -147,31 +174,101 @@ func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offsetStart := params.Offset + 1
+	offsetStart := result.Offset + 1
 	if result.TotalCount == 0 {
 		offsetStart = 0
 	}
 
 	data := dashboardData{
-		RefreshSec:  h.refreshSec,
-		CSRFToken:   middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
-		Events:      buildDashboardEvents(result.Events, annotations),
-		Filters:     filters,
-		TotalCount:  result.TotalCount,
-		Limit:       result.Limit,
-		Offset:      result.Offset,
-		HasPrev:     params.Offset > 0,
-		HasNext:     params.Offset+params.Limit < result.TotalCount,
-		PrevURL:     h.paginationURL(r, params.Offset-params.Limit, params.Limit),
-		NextURL:     h.paginationURL(r, params.Offset+params.Limit, params.Limit),
-		OffsetStart: offsetStart,
-		OffsetEnd:   params.Offset + len(result.Events),
+		RefreshSec:   h.refreshSec,
+		CSRFToken:    middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
+		Events:       buildDashboardEvents(result.Events, annotations),
+		BannerEvents: banner.Events,
+		BannerTotal:  banner.TotalCount,
+		BannerURL:    currentSeverityURL(filters.Team, []string{"sev0", "sev1"}),
+		Filters:      filters,
+		TotalCount:   result.TotalCount,
+		Limit:        result.Limit,
+		Offset:       result.Offset,
+		HasPrev:      result.Offset > 0,
+		HasNext:      result.Offset+result.Limit < result.TotalCount,
+		PrevURL:      h.paginationURL(r, result.Offset-result.Limit, result.Limit),
+		NextURL:      h.paginationURL(r, result.Offset+result.Limit, result.Limit),
+		OffsetStart:  offsetStart,
+		OffsetEnd:    result.Offset + len(result.Events),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := h.dashboardTmpl.ExecuteTemplate(w, "layout", data); err != nil {
 		slog.ErrorContext(r.Context(), "dashboard template execute error", "error", err)
 		http.Error(w, "Template error", http.StatusInternalServerError)
+	}
+}
+
+func (h *DashboardHandler) listDashboardEvents(ctx context.Context, params model.ListParams, filters dashboardFilters) (*model.ListResult, error) {
+	switch filters.View {
+	case "current":
+		return h.svc.ListCurrent(ctx, model.CurrentParams{
+			ForTeam:    filters.Team,
+			Scopes:     filters.Scopes,
+			Severities: filters.Severities,
+			EventType:  params.EventType,
+			Limit:      params.Limit,
+			Offset:     params.Offset,
+		})
+	case "site":
+		return h.svc.ListCurrent(ctx, model.CurrentParams{
+			Scopes:     []string{"site"},
+			Severities: filters.Severities,
+			EventType:  params.EventType,
+			Limit:      params.Limit,
+			Offset:     params.Offset,
+		})
+	default:
+		return h.svc.List(ctx, params)
+	}
+}
+
+func dashboardURL(view, team, rangeValue string) string {
+	q := url.Values{}
+	q.Set("view", view)
+	if team != "" {
+		q.Set("team", team)
+	}
+	if rangeValue != "" {
+		q.Set("range", rangeValue)
+	}
+	return "/?" + q.Encode()
+}
+
+func currentSeverityURL(team string, severities []string) string {
+	q := url.Values{"view": {"current"}}
+	if team != "" {
+		q.Set("team", team)
+	}
+	for _, severity := range severities {
+		q.Add("severity", severity)
+	}
+	return "/?" + q.Encode()
+}
+
+func formatElapsed(timestamp time.Time) string {
+	duration := time.Since(timestamp)
+	if duration < time.Minute {
+		return "<1m"
+	}
+
+	duration = duration.Truncate(time.Minute)
+	days := int(duration / (24 * time.Hour))
+	hours := int(duration % (24 * time.Hour) / time.Hour)
+	minutes := int(duration % time.Hour / time.Minute)
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd %dh", days, hours)
+	case hours > 0:
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	default:
+		return fmt.Sprintf("%dm", minutes)
 	}
 }
 

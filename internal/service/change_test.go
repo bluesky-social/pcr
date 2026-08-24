@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ type mockStore struct {
 	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
+	listCurrentFn         func(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
 	getAnnotationsBatchFn func(ctx context.Context, eventIDs []string) (map[string]*model.EventAnnotations, error)
 }
@@ -49,6 +51,13 @@ func (m *mockStore) List(ctx context.Context, params model.ListParams) (*model.L
 		panic("unexpected call to List")
 	}
 	return m.listFn(ctx, params)
+}
+
+func (m *mockStore) ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error) {
+	if m.listCurrentFn == nil {
+		panic("unexpected call to ListCurrent")
+	}
+	return m.listCurrentFn(ctx, params)
 }
 
 func (m *mockStore) GetAnnotations(ctx context.Context, eventID string) (*model.EventAnnotations, error) {
@@ -98,7 +107,11 @@ func TestCreate(t *testing.T) {
 			EventType:       model.EventTypeDeployment,
 			Description:     "deploy v42",
 			LongDescription: "full rollout of v42",
-			Tags:            map[string]string{"env": "prod"},
+			Links: []model.EventLink{
+				{Label: "Pull request", URL: "https://github.com/example/repo/pull/42"},
+				{Label: "Runbook", URL: "https://notion.so/example/runbook"},
+			},
+			Tags: map[string]string{"env": "prod"},
 		}
 
 		got, err := svc.Create(context.Background(), req)
@@ -135,6 +148,9 @@ func TestCreate(t *testing.T) {
 		if got.LongDescription != "full rollout of v42" {
 			t.Errorf("LongDescription = %q, want %q", got.LongDescription, "full rollout of v42")
 		}
+		if len(got.Links) != 2 || got.Links[0].Label != "Pull request" || got.Links[1].URL != "https://notion.so/example/runbook" {
+			t.Errorf("Links = %#v, want request links in order", got.Links)
+		}
 		if got.Tags["env"] != "prod" {
 			t.Errorf("Tags[env] = %q, want %q", got.Tags["env"], "prod")
 		}
@@ -144,6 +160,24 @@ func TestCreate(t *testing.T) {
 
 		if captured == nil {
 			t.Fatal("store.Create was not called")
+		}
+		if len(captured.Links) != 2 {
+			t.Errorf("captured Links = %#v, want 2 links", captured.Links)
+		}
+	})
+
+	t.Run("invalid link URL errors before storage", func(t *testing.T) {
+		t.Parallel()
+
+		ms := &mockStore{}
+		svc := service.NewChangeService(ms)
+		_, err := svc.Create(context.Background(), &model.CreateChangeRequest{
+			UserName:  "alice",
+			EventType: model.EventTypeDeployment,
+			Links:     []model.EventLink{{Label: "unsafe", URL: "javascript:alert(1)"}},
+		})
+		if !errors.Is(err, service.ErrInvalidLink) {
+			t.Fatalf("got error %v, want %v", err, service.ErrInvalidLink)
 		}
 	})
 
@@ -470,6 +504,63 @@ func TestList(t *testing.T) {
 		_, err := svc.List(context.Background(), model.ListParams{Limit: 10})
 		if !errors.Is(err, storeErr) {
 			t.Fatalf("got error %v, want %v", err, storeErr)
+		}
+	})
+}
+
+func TestListCurrent(t *testing.T) {
+	t.Parallel()
+
+	want := &model.ListResult{Events: []model.ChangeEvent{{ID: "active"}}, TotalCount: 1}
+	var captured model.CurrentParams
+	storeErr := errors.New("current query failed")
+
+	t.Run("normalizes limit and delegates", func(t *testing.T) {
+		t.Parallel()
+
+		ms := &mockStore{
+			listCurrentFn: func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
+				captured = params
+				return want, nil
+			},
+		}
+		svc := service.NewChangeService(ms)
+		result, err := svc.ListCurrent(t.Context(), model.CurrentParams{
+			ForTeam:    "payments",
+			Scopes:     []string{"site"},
+			Severities: []string{"sev0", "sev1"},
+			EventType:  "deployment",
+			Offset:     10,
+		})
+		if err != nil {
+			t.Fatalf("ListCurrent() error = %v", err)
+		}
+		if result != want {
+			t.Errorf("ListCurrent() result = %p, want %p", result, want)
+		}
+		if captured.Limit != model.DefaultLimit {
+			t.Errorf("Limit = %d, want %d", captured.Limit, model.DefaultLimit)
+		}
+		if captured.ForTeam != "payments" || captured.EventType != "deployment" || captured.Offset != 10 {
+			t.Errorf("captured params = %+v", captured)
+		}
+		if fmt.Sprint(captured.Scopes) != "[site]" || fmt.Sprint(captured.Severities) != "[sev0 sev1]" {
+			t.Errorf("captured slice params = %+v", captured)
+		}
+	})
+
+	t.Run("propagates store error", func(t *testing.T) {
+		t.Parallel()
+
+		ms := &mockStore{
+			listCurrentFn: func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+				return nil, storeErr
+			},
+		}
+		svc := service.NewChangeService(ms)
+		_, err := svc.ListCurrent(t.Context(), model.CurrentParams{Limit: model.MaxLimit + 1})
+		if !errors.Is(err, storeErr) {
+			t.Errorf("ListCurrent() error = %v, want %v", err, storeErr)
 		}
 	})
 }

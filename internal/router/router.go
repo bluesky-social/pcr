@@ -37,6 +37,7 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(cfg.APITokens, cfg.RequireAuthReads, nil))
 
+		r.Get("/api/v1/current", apiHandler.ListCurrent)
 		r.Get("/api/v1/events", apiHandler.ListEvents)
 		r.Post("/api/v1/events", apiHandler.CreateEvent)
 		r.Get("/api/v1/events/{id}", apiHandler.GetEvent)

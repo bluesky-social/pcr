@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,9 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 	if err := insertTags(ctx, tx, event.ID, event.Tags); err != nil {
 		return nil, err
 	}
+	if err := insertLinks(ctx, tx, event.ID, event.Links); err != nil {
+		return nil, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit tx: %w", err)
@@ -145,6 +149,7 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 		EventType:       event.EventType,
 		Description:     event.Description,
 		LongDescription: event.LongDescription,
+		Links:           slices.Clone(event.Links),
 		Tags:            maps.Clone(event.Tags),
 		CreatedAt:       canonicalTime(event.CreatedAt),
 	}
@@ -260,6 +265,11 @@ func (s *Store) GetByID(ctx context.Context, id string) (result *model.ChangeEve
 		return nil, err
 	}
 	ev.Tags = tags[ev.ID]
+	links, err := s.loadLinksForEvents(ctx, []string{ev.ID})
+	if err != nil {
+		return nil, err
+	}
+	ev.Links = links[ev.ID]
 
 	return ev, nil
 }
@@ -317,7 +327,7 @@ func (s *Store) List(ctx context.Context, params model.ListParams) (result *mode
 		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
 
-	// Load tags for all returned events in a single query.
+	// Load related records for all returned events in bounded queries.
 	if len(eventIDs) > 0 {
 		tagMap, err := s.loadTagsForEvents(ctx, eventIDs)
 		if err != nil {
@@ -325,6 +335,155 @@ func (s *Store) List(ctx context.Context, params model.ListParams) (result *mode
 		}
 		for i := range events {
 			events[i].Tags = tagMap[events[i].ID]
+		}
+		linkMap, err := s.loadLinksForEvents(ctx, eventIDs)
+		if err != nil {
+			return nil, err
+		}
+		for i := range events {
+			events[i].Links = linkMap[events[i].ID]
+		}
+	}
+
+	return &model.ListResult{
+		Events:     events,
+		TotalCount: totalCount,
+		Limit:      limit,
+		Offset:     params.Offset,
+	}, nil
+}
+
+const currentCTEs = `WITH phase_event AS (
+	SELECT tag.event_id AS id,
+	       event.event_type,
+	       event.timestamp,
+	       tag.value AS phase
+	FROM change_event_tags AS tag
+	JOIN change_events AS event ON event.id = tag.event_id
+	WHERE tag.key = 'phase'
+	  AND tag.value IN ('start', 'end')
+	  AND event.parent_id IS NULL
+),
+correlated AS MATERIALIZED (
+	SELECT phase_event.id,
+	       phase_event.event_type,
+	       phase_event.timestamp,
+	       phase_event.phase,
+	       CASE
+	           WHEN NULLIF(change_tag.value, '') IS NOT NULL THEN 'change_id'
+	           ELSE 'deploy_id'
+	       END AS correlation_key,
+	       COALESCE(
+	           NULLIF(change_tag.value, ''),
+	           NULLIF(deploy_tag.value, '')
+	       ) AS correlation_value
+	FROM phase_event
+	LEFT JOIN change_event_tags AS change_tag
+	       ON change_tag.event_id = phase_event.id AND change_tag.key = 'change_id'
+	LEFT JOIN change_event_tags AS deploy_tag
+	       ON deploy_tag.event_id = phase_event.id AND deploy_tag.key = 'deploy_id'
+),
+ended AS MATERIALIZED (
+	SELECT DISTINCT event_type, correlation_key, correlation_value
+	FROM correlated
+	WHERE phase = 'end'
+	  AND correlation_value IS NOT NULL
+),
+active AS (
+	SELECT candidate.id,
+	       candidate.timestamp,
+	       ROW_NUMBER() OVER (
+	           PARTITION BY candidate.event_type,
+	                        candidate.correlation_key,
+	                        candidate.correlation_value
+	           ORDER BY candidate.timestamp ASC, candidate.id ASC
+	       ) AS representative_rank
+	FROM correlated AS candidate
+	LEFT JOIN ended
+	       ON ended.event_type = candidate.event_type
+	      AND ended.correlation_key = candidate.correlation_key
+	      AND ended.correlation_value = candidate.correlation_value
+	WHERE candidate.phase = 'start'
+	  AND candidate.correlation_value IS NOT NULL
+	  AND ended.correlation_value IS NULL
+)
+`
+
+const currentFrom = `FROM active
+JOIN change_events AS event ON event.id = active.id
+LEFT JOIN change_event_tags AS team
+	ON team.event_id = active.id AND team.key = 'team'
+LEFT JOIN change_event_tags AS scope
+	ON scope.event_id = active.id AND scope.key = 'scope'
+LEFT JOIN change_event_tags AS severity
+	ON severity.event_id = active.id AND severity.key = 'severity'`
+
+// ListCurrent returns one representative start event for each logical operation
+// that has no matching end event. Filtering and pagination apply after reduction.
+func (s *Store) ListCurrent(ctx context.Context, params model.CurrentParams) (result *model.ListResult, err error) {
+	start := time.Now()
+	defer func() { s.logOperation(ctx, "ListCurrent", start, err) }()
+
+	where, args := buildCurrentWhereClause(params)
+	limit := params.EffectiveLimit()
+
+	// SQL fragments are constants and user input is passed only as bound values.
+	//nolint:gosec // G201: constant query shape with parameter placeholders
+	countQuery := fmt.Sprintf("%sSELECT COUNT(*) %s%s", currentCTEs, currentFrom, where)
+	var totalCount int
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+		return nil, fmt.Errorf("count current events: %w", err)
+	}
+
+	//nolint:gosec // G201: constant query shape with parameter placeholders
+	selectQuery := fmt.Sprintf(
+		`%sSELECT event.id, event.external_id, event.parent_id, event.user_name, event.timestamp,
+		       event.event_type, event.description, event.long_description, event.created_at
+		%s%s
+		ORDER BY event.timestamp DESC, event.id ASC
+		LIMIT ? OFFSET ?`,
+		currentCTEs,
+		currentFrom,
+		where,
+	)
+	fetchArgs := make([]any, 0, len(args)+2)
+	fetchArgs = append(fetchArgs, args...)
+	fetchArgs = append(fetchArgs, limit, params.Offset)
+
+	rows, err := s.db.QueryContext(ctx, selectQuery, fetchArgs...) //nolint:sqlclosecheck // closed by deferred closeQuiet
+	if err != nil {
+		return nil, fmt.Errorf("list current events: %w", err)
+	}
+	defer closeQuiet(ctx, "ListCurrent", rows)
+
+	events := make([]model.ChangeEvent, 0)
+	eventIDs := make([]string, 0)
+	for rows.Next() {
+		event, err := scanEventFromRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan current event: %w", err)
+		}
+		events = append(events, *event)
+		eventIDs = append(eventIDs, event.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("current rows iteration: %w", err)
+	}
+
+	if len(eventIDs) > 0 {
+		tagMap, err := s.loadTagsForEvents(ctx, eventIDs)
+		if err != nil {
+			return nil, err
+		}
+		for i := range events {
+			events[i].Tags = tagMap[events[i].ID]
+		}
+		linkMap, err := s.loadLinksForEvents(ctx, eventIDs)
+		if err != nil {
+			return nil, err
+		}
+		for i := range events {
+			events[i].Links = linkMap[events[i].ID]
 		}
 	}
 
@@ -521,6 +680,11 @@ func (s *Store) GetByExternalID(ctx context.Context, externalID string) (result 
 		return nil, err
 	}
 	ev.Tags = tags[ev.ID]
+	links, err := s.loadLinksForEvents(ctx, []string{ev.ID})
+	if err != nil {
+		return nil, err
+	}
+	ev.Links = links[ev.ID]
 
 	return ev, nil
 }
@@ -619,6 +783,28 @@ func insertTags(ctx context.Context, tx *sql.Tx, eventID string, tags map[string
 	return nil
 }
 
+func insertLinks(ctx context.Context, tx *sql.Tx, eventID string, links []model.EventLink) error {
+	if len(links) == 0 {
+		return nil
+	}
+
+	stmt, err := tx.PrepareContext( //nolint:sqlclosecheck // closed via deferred closeQuiet below
+		ctx,
+		`INSERT INTO change_event_links (event_id, position, label, url) VALUES (?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare insert links: %w", err)
+	}
+	defer closeQuiet(ctx, "insertLinks", stmt)
+
+	for position, link := range links {
+		if _, err := stmt.ExecContext(ctx, eventID, position, link.Label, link.URL); err != nil {
+			return fmt.Errorf("insert link %d: %w", position, err)
+		}
+	}
+	return nil
+}
+
 // loadTagsForEvents fetches tags for the given event IDs in one query.
 func (s *Store) loadTagsForEvents(ctx context.Context, ids []string) (map[string]map[string]string, error) {
 	if len(ids) == 0 {
@@ -658,6 +844,41 @@ func (s *Store) loadTagsForEvents(ctx context.Context, ids []string) (map[string
 		result[eventID][key] = value
 	}
 
+	return result, rows.Err()
+}
+
+func (s *Store) loadLinksForEvents(ctx context.Context, ids []string) (map[string][]model.EventLink, error) {
+	if len(ids) == 0 {
+		return make(map[string][]model.EventLink), nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	//nolint:gosec // G201: only `?` placeholder count is interpolated; IDs are bound values
+	query := fmt.Sprintf(
+		`SELECT event_id, label, url FROM change_event_links WHERE event_id IN (%s) ORDER BY event_id, position`,
+		strings.Join(placeholders, ","),
+	)
+	rows, err := s.db.QueryContext(ctx, query, args...) //nolint:sqlclosecheck // closed by closeQuiet
+	if err != nil {
+		return nil, fmt.Errorf("load links: %w", err)
+	}
+	defer closeQuiet(ctx, "loadLinksForEvents", rows)
+
+	result := make(map[string][]model.EventLink)
+	for rows.Next() {
+		var eventID string
+		var link model.EventLink
+		if err := rows.Scan(&eventID, &link.Label, &link.URL); err != nil {
+			return nil, fmt.Errorf("scan link: %w", err)
+		}
+		result[eventID] = append(result[eventID], link)
+	}
 	return result, rows.Err()
 }
 
@@ -733,6 +954,38 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 
 	if len(clauses) == 0 {
 		return "", make([]any, 0)
+	}
+
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func buildCurrentWhereClause(params model.CurrentParams) (string, []any) {
+	clauses := []string{"active.representative_rank = 1"}
+	args := make([]any, 0)
+
+	if params.ForTeam != "" {
+		clauses = append(clauses, "(team.value = ? OR NULLIF(team.value, '') IS NULL OR scope.value = 'site')")
+		args = append(args, params.ForTeam)
+	}
+	if len(params.Scopes) > 0 {
+		placeholders := make([]string, len(params.Scopes))
+		for i, scope := range params.Scopes {
+			placeholders[i] = "?"
+			args = append(args, scope)
+		}
+		clauses = append(clauses, "scope.value IN ("+strings.Join(placeholders, ",")+")")
+	}
+	if len(params.Severities) > 0 {
+		placeholders := make([]string, len(params.Severities))
+		for i, severity := range params.Severities {
+			placeholders[i] = "?"
+			args = append(args, strings.ToLower(severity))
+		}
+		clauses = append(clauses, "LOWER(severity.value) IN ("+strings.Join(placeholders, ",")+")")
+	}
+	if params.EventType != "" {
+		clauses = append(clauses, "event.event_type = ?")
+		args = append(args, params.EventType)
 	}
 
 	return " WHERE " + strings.Join(clauses, " AND "), args

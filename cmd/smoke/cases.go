@@ -23,7 +23,11 @@ type testCase struct {
 // IDs, login session). It is reset to a zero value at the start of each
 // run so cases are deterministic across invocations.
 type fixture struct {
-	parentEventID string
+	parentEventID      string
+	currentActiveID    string
+	currentCompletedID string
+	currentSiteID      string
+	currentOtherTeamID string
 }
 
 // allCases is executed in order. Earlier cases that fail do not abort the
@@ -43,6 +47,8 @@ func allCases() []testCase {
 		{"list_filter_user", caseListFilterUser},
 		{"list_filter_type", caseListFilterType},
 		{"list_filter_tag", caseListFilterTag},
+		{"create_current_fixtures", caseCreateCurrentFixtures},
+		{"list_current_for_team", caseListCurrentForTeam},
 		{"toggle_star_via_api", caseToggleStarAPI},
 		{"annotations_show_starred", caseAnnotationsStarred},
 		{"toggle_star_again_unstars", caseToggleStarTwice},
@@ -252,6 +258,111 @@ func caseListFilterTag(ctx context.Context, c *client, _ *fixture) error {
 		if e.Tags["env"] != "prod" {
 			return fmt.Errorf("filter leak: event %s has tags=%v", e.ID, e.Tags)
 		}
+	}
+	return nil
+}
+
+func caseCreateCurrentFixtures(ctx context.Context, c *client, f *fixture) error {
+	fixtures := []struct {
+		request model.CreateChangeRequest
+		assign  func(string)
+	}{
+		{
+			request: model.CreateChangeRequest{
+				UserName:    "smoke",
+				EventType:   model.EventTypeDeployment,
+				ExternalID:  "smoke-current-active-start",
+				Description: "active payments deployment",
+				Tags:        map[string]string{"deploy_id": "smoke-active", "phase": "start", "team": "payments", "scope": "service", "severity": "sev2"},
+			},
+			assign: func(id string) { f.currentActiveID = id },
+		},
+		{
+			request: model.CreateChangeRequest{
+				UserName:    "smoke",
+				EventType:   model.EventTypeDeployment,
+				ExternalID:  "smoke-current-completed-start",
+				Description: "completed payments deployment",
+				Tags:        map[string]string{"deploy_id": "smoke-completed", "phase": "start", "team": "payments", "scope": "service", "severity": "sev2"},
+			},
+			assign: func(id string) { f.currentCompletedID = id },
+		},
+		{
+			request: model.CreateChangeRequest{
+				UserName:    "smoke",
+				EventType:   model.EventTypeDeployment,
+				ExternalID:  "smoke-current-completed-end",
+				Description: "completed payments deployment finished",
+				Tags:        map[string]string{"deploy_id": "smoke-completed", "phase": "end"},
+			},
+		},
+		{
+			request: model.CreateChangeRequest{
+				UserName:    "smoke",
+				EventType:   "incident",
+				ExternalID:  "smoke-current-site-start",
+				Description: "active site incident",
+				Tags:        map[string]string{"change_id": "smoke-site", "phase": "start", "team": "platform", "scope": "site", "severity": "SEV0"},
+			},
+			assign: func(id string) { f.currentSiteID = id },
+		},
+		{
+			request: model.CreateChangeRequest{
+				UserName:    "smoke",
+				EventType:   model.EventTypeDeployment,
+				ExternalID:  "smoke-current-other-team-start",
+				Description: "active platform deployment",
+				Tags:        map[string]string{"change_id": "smoke-other-team", "phase": "start", "team": "platform", "scope": "service", "severity": "sev1"},
+			},
+			assign: func(id string) { f.currentOtherTeamID = id },
+		},
+	}
+
+	for _, item := range fixtures {
+		var event model.ChangeEvent
+		response, err := c.postJSON(ctx, "/api/v1/events", item.request, &event)
+		if err != nil {
+			return err
+		}
+		if response.Status != http.StatusCreated && response.Status != http.StatusOK {
+			return expectStatus(response, http.StatusCreated)
+		}
+		if item.assign != nil {
+			item.assign(event.ID)
+		}
+	}
+	return nil
+}
+
+func caseListCurrentForTeam(ctx context.Context, c *client, f *fixture) error {
+	if f.currentActiveID == "" || f.currentCompletedID == "" || f.currentSiteID == "" || f.currentOtherTeamID == "" {
+		return fmt.Errorf("skipped: current fixtures were not created")
+	}
+
+	var result model.ListResult
+	response, err := c.getJSON(ctx, "/api/v1/current?for_team=payments", &result)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(response, http.StatusOK); err != nil {
+		return err
+	}
+
+	found := make(map[string]bool)
+	for _, event := range result.Events {
+		found[event.ID] = true
+	}
+	if !found[f.currentActiveID] {
+		return fmt.Errorf("active team deployment %s missing from Current", f.currentActiveID)
+	}
+	if !found[f.currentSiteID] {
+		return fmt.Errorf("site-wide incident %s missing from Current", f.currentSiteID)
+	}
+	if found[f.currentCompletedID] {
+		return fmt.Errorf("completed deployment %s present in Current", f.currentCompletedID)
+	}
+	if found[f.currentOtherTeamID] {
+		return fmt.Errorf("unrelated team deployment %s present in Current", f.currentOtherTeamID)
 	}
 	return nil
 }

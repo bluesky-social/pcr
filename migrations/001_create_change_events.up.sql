@@ -23,5 +23,5 @@ CREATE TABLE IF NOT EXISTS change_event_tags (
     value    TEXT    NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS idx_change_event_tags_key_value ON change_event_tags (key, value);
-CREATE INDEX IF NOT EXISTS idx_change_event_tags_event_id ON change_event_tags (event_id);
+CREATE INDEX IF NOT EXISTS idx_change_event_tags_key_value ON change_event_tags (key, value, event_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_change_event_tags_event_key ON change_event_tags (event_id, key);

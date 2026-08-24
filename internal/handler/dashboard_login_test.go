@@ -45,7 +45,16 @@ type dashboardStack struct {
 }
 
 func newDashboardTestStack() *dashboardStack {
-	ms := &mockStore{}
+	ms := &mockStore{
+		listCurrentFn: func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
+			return &model.ListResult{
+				Events:     []model.ChangeEvent{},
+				TotalCount: 0,
+				Limit:      params.EffectiveLimit(),
+				Offset:     params.Offset,
+			}, nil
+		},
+	}
 	svc := service.NewChangeService(ms)
 	h := handler.NewDashboardHandler(svc, 60, dashboardSessionSecret)
 
@@ -462,6 +471,137 @@ func TestDashboard(t *testing.T) {
 		}
 		if strings.Contains(rec.Body.String(), "database connection lost") {
 			t.Error("internal error message leaked to response body")
+		}
+	})
+
+	t.Run("current view uses current query and renders independent banner", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		historyCalled := false
+		ds.store.listFn = func(_ context.Context, _ model.ListParams) (*model.ListResult, error) {
+			historyCalled = true
+			return &model.ListResult{}, nil
+		}
+		var tableParams, bannerParams model.CurrentParams
+		ds.store.listCurrentFn = func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
+			if len(params.Severities) == 2 && params.Severities[0] == "sev0" && params.Severities[1] == "sev1" {
+				bannerParams = params
+				return &model.ListResult{
+					Events: []model.ChangeEvent{{
+						ID:          "site-incident",
+						EventType:   "incident",
+						Description: "database failover in progress",
+						Timestamp:   time.Now().UTC().Add(-time.Hour),
+						Tags:        map[string]string{"team": "platform", "scope": "site", "severity": "SEV0"},
+					}},
+					TotalCount: 2,
+					Limit:      params.Limit,
+				}, nil
+			}
+
+			tableParams = params
+			return &model.ListResult{
+				Events: []model.ChangeEvent{{
+					ID:          "payments-change",
+					EventType:   "deployment",
+					Description: "payments rollout",
+					Timestamp:   time.Now().UTC().Add(-30 * time.Minute),
+					Tags:        map[string]string{"team": "payments", "scope": "service", "severity": "sev2"},
+				}},
+				TotalCount: 3,
+				Limit:      params.Limit,
+				Offset:     params.Offset,
+			}, nil
+		}
+		ds.store.getAnnotationsBatchFn = emptyAnnotationsBatchFn
+
+		req := httptest.NewRequestWithContext(
+			t.Context(),
+			http.MethodGet,
+			"/?view=current&team=payments&type=deployment&severity=sev2&limit=1&offset=1",
+			nil,
+		)
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		if historyCalled {
+			t.Error("current view called historical List")
+		}
+		if tableParams.ForTeam != "payments" || tableParams.EventType != "deployment" || tableParams.Limit != 1 || tableParams.Offset != 1 {
+			t.Errorf("table params = %+v", tableParams)
+		}
+		if len(tableParams.Severities) != 1 || tableParams.Severities[0] != "sev2" {
+			t.Errorf("table severities = %v, want [sev2]", tableParams.Severities)
+		}
+		if bannerParams.ForTeam != "payments" || bannerParams.Limit <= tableParams.Limit {
+			t.Errorf("banner params = %+v, want independent bounded query", bannerParams)
+		}
+
+		body := rec.Body.String()
+		for _, want := range []string{
+			"Active high-severity changes",
+			"database failover in progress",
+			"Site-wide",
+			"payments rollout",
+			"Current",
+			"Next",
+			"team=payments",
+			"view=current",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("body does not contain %q", want)
+			}
+		}
+	})
+
+	t.Run("site view forces site scope", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		var siteParams model.CurrentParams
+		ds.store.listCurrentFn = func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
+			if len(params.Severities) == 0 {
+				siteParams = params
+			}
+			return &model.ListResult{Events: []model.ChangeEvent{}, Limit: params.Limit}, nil
+		}
+		ds.store.getAnnotationsBatchFn = emptyAnnotationsBatchFn
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/?view=site&team=payments", nil)
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		if len(siteParams.Scopes) != 1 || siteParams.Scopes[0] != "site" {
+			t.Errorf("site scopes = %v, want [site]", siteParams.Scopes)
+		}
+		if siteParams.ForTeam != "" {
+			t.Errorf("site ForTeam = %q, want empty", siteParams.ForTeam)
+		}
+	})
+
+	t.Run("banner error fails the page", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		ds.store.listFn = emptyListFn
+		ds.store.listCurrentFn = func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+			return nil, errors.New("banner query failed")
+		}
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want 500", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "banner query failed") {
+			t.Error("internal banner error leaked to response")
 		}
 	})
 }

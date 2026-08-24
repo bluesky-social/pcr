@@ -27,8 +27,15 @@ type ChangeEvent struct {
 	EventType       string            `json:"event_type"`
 	Description     string            `json:"description"`
 	LongDescription string            `json:"long_description"`
+	Links           []EventLink       `json:"links,omitempty"`
 	Tags            map[string]string `json:"tags,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
+}
+
+// EventLink is an ordered external reference attached to an event.
+type EventLink struct {
+	Label string `json:"label,omitempty"`
+	URL   string `json:"url"`
 }
 
 // IsMetaEvent returns true if this event is an annotation on another event.
@@ -51,6 +58,16 @@ type ListParams struct {
 	Offset      int               `json:"offset"`
 }
 
+// CurrentParams holds filtering and pagination parameters for active logical operations.
+type CurrentParams struct {
+	ForTeam    string   `json:"for_team,omitempty"`
+	Scopes     []string `json:"scopes,omitempty"`
+	Severities []string `json:"severities,omitempty"`
+	EventType  string   `json:"event_type,omitempty"`
+	Limit      int      `json:"limit"`
+	Offset     int      `json:"offset"`
+}
+
 // DefaultLimit is the default number of results returned by the API.
 const DefaultLimit = 50
 
@@ -62,13 +79,22 @@ const MaxLimit = 200
 
 // EffectiveLimit returns the Limit to use, clamped to [1, 200] with a default of 50.
 func (p ListParams) EffectiveLimit() int {
+	return effectiveLimit(p.Limit)
+}
+
+// EffectiveLimit returns the Limit to use, clamped to [1, 200] with a default of 50.
+func (p CurrentParams) EffectiveLimit() int {
+	return effectiveLimit(p.Limit)
+}
+
+func effectiveLimit(limit int) int {
 	switch {
-	case p.Limit <= 0:
+	case limit <= 0:
 		return DefaultLimit
-	case p.Limit > MaxLimit:
+	case limit > MaxLimit:
 		return MaxLimit
 	default:
-		return p.Limit
+		return limit
 	}
 }
 
@@ -89,6 +115,7 @@ type CreateChangeRequest struct {
 	EventType       string            `json:"event_type"`
 	Description     string            `json:"description"`
 	LongDescription string            `json:"long_description,omitempty"`
+	Links           []EventLink       `json:"links,omitempty"`
 	Tags            map[string]string `json:"tags,omitempty"`
 }
 

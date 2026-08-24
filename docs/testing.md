@@ -22,6 +22,14 @@ Run the end-to-end smoke suite against an ephemeral local server:
 make smoke
 ```
 
+Run the seeded real-SQLite dashboard functional test:
+
+```bash
+go test -tags=integration ./internal/handler -run TestSeededDashboardViews
+```
+
+It loads `testdata/functional/phosphor-demo.json`, exercises Current, Site-wide, History, Alerts, lifecycle reduction, annotations, the severity banner, and locally embedded font delivery through the real router.
+
 To test an already-running server, including the Docker Compose service:
 
 ```bash
@@ -104,9 +112,9 @@ pcr "http://localhost:8080/api/v1/events/$EVENT_ID/annotations" | jq
 
 Current annotation state follows meta-event creation order, not a caller-supplied event timestamp. The newest `alert` or `clear-alert` transition wins; star state is reduced independently from `star` and `unstar` transitions.
 
-## Verify recorded deployment phases
+## Verify current production changes
 
-Deployment phases are a separate convention. They record lifecycle points but are not reduced into current annotation state:
+Create a deployment start. This example uses the legacy `deploy_id`; new integrations should prefer `change_id`:
 
 ```bash
 pcr -X POST http://localhost:8080/api/v1/events -d '{
@@ -114,9 +122,20 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
   "user_name": "alice",
   "event_type": "deployment",
   "description": "Deploy api v2.4.1 started",
-  "tags": {"deploy_id": "d-001", "phase": "start", "env": "prod"}
+  "tags": {"deploy_id": "d-001", "phase": "start", "team": "payments", "scope": "service", "severity": "sev1", "env": "prod"}
 }' | jq
+```
 
+It appears in Current without a time bound:
+
+```bash
+pcr "http://localhost:8080/api/v1/current?for_team=payments" \
+  | jq '.events[] | select(.tags.deploy_id == "d-001")'
+```
+
+Append the matching end event:
+
+```bash
 pcr -X POST http://localhost:8080/api/v1/events -d '{
   "external_id": "manual-deploy-d-001-end",
   "user_name": "alice",
@@ -129,18 +148,29 @@ pcr "http://localhost:8080/api/v1/events?tag=deploy_id:d-001" \
   | jq '.events[] | {timestamp, description, tags}'
 ```
 
-The result contains two top-level events. The server does not pair them or infer an active/done state from the `phase` tag.
+History still contains both immutable rows, while Current no longer includes `d-001`:
+
+```bash
+pcr "http://localhost:8080/api/v1/current?for_team=payments" \
+  | jq '.events[] | select(.tags.deploy_id == "d-001")'
+# no output
+```
+
+Use a new logical identifier for a restarted operation. A retry of the same phase should reuse its phase-specific `external_id`. Exact lowercase phase values participate; display tag values should also be lowercase, although severity reads accept existing uppercase values such as `SEV0`.
 
 ## Dashboard checks
 
 Open `http://localhost:8080/login`, enter `test-token`, and verify:
 
 1. The default view contains top-level events timestamped within the last 24 hours.
-2. Time-range, event-type, user, and tag filters change the displayed rows.
-3. The star button changes the event's current star annotation.
-4. An actively alerted event has alert styling and appears in the Alerts view if its parent event is within the selected time range.
-5. The detail page displays the event and its current annotation state. It does not display the meta-event history.
-6. The page refreshes at the configured `PCR_DASHBOARD_REFRESH_SEC` interval.
+2. Current shows the selected team's active work, unattributed active work, and active site-wide work regardless of age.
+3. Site-wide shows only active `scope=site` work, and site rows are visually distinct.
+4. Active `sev0` and `sev1` work appears in the banner independently of table pagination.
+5. Time-range, event-type, user, and tag filters change History rows.
+6. The star button changes the event's current star annotation.
+7. An actively alerted event has alert styling and appears in the Alerts view if its parent event is within the selected time range.
+8. The detail page displays the event and its current annotation state. It does not display the meta-event history.
+9. The page refreshes at the configured `PCR_DASHBOARD_REFRESH_SEC` interval.
 
 ## Idempotency
 

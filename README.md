@@ -51,6 +51,7 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 | `GET` | `/api/v1/health` | Health check (no auth required, verifies DB connectivity) |
 | `POST` | `/api/v1/events` | Create a change event or meta-event |
 | `GET` | `/api/v1/events` | List events (with filters) |
+| `GET` | `/api/v1/current` | List active logical operations derived from phase events |
 | `GET` | `/api/v1/events/{id}` | Get a single event |
 | `GET` | `/api/v1/events/{id}/annotations` | Get derived annotation state (starred, alerted) |
 | `POST` | `/api/v1/events/{id}/star` | Toggle star (creates a star or unstar meta-event) |
@@ -81,6 +82,19 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 | `limit` | int | Max results, 1-200 (default 50) |
 | `offset` | int | Pagination offset |
 
+### Query parameters for `GET /api/v1/current`
+
+Current results have no time bound. Filters apply after start/end events have been reduced into logical active operations.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `for_team` | string | Include this team's work, unattributed work, and all `scope=site` work |
+| `scope` | string | Scope filter; repeat for OR semantics |
+| `severity` | string | Case-insensitive severity filter; repeat for OR semantics |
+| `type` | string | Exact event-type filter |
+| `limit` | int | Max results, 1-200 (default 50) |
+| `offset` | int | Pagination offset over reduced logical operations |
+
 ### Examples
 
 **Health check:**
@@ -105,6 +119,10 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "description": "Deploy payments-service v2.4.1",
   "long_description": "Rolling update across 3 regions",
+	"links": [
+	  {"label": "Pull request", "url": "https://github.com/example/payments/pull/241"},
+	  {"label": "Runbook", "url": "https://notion.so/example/payments-rollout"}
+	],
   "tags": {"service": "payments", "region": "us-east-1"}
 }'
 ```
@@ -127,6 +145,14 @@ This returns events from 30 minutes before the given timestamp (inclusive) to 30
 
 ```bash
 pcr "http://localhost:8080/api/v1/events?top_level=true"
+```
+
+**List current work visible to a team:**
+
+```bash
+pcr "http://localhost:8080/api/v1/current?for_team=payments"
+pcr "http://localhost:8080/api/v1/current?for_team=payments&severity=sev0&severity=sev1"
+pcr "http://localhost:8080/api/v1/current?scope=site"
 ```
 
 **Get a single event:**
@@ -204,7 +230,7 @@ The `GET /api/v1/events/{id}/annotations` endpoint returns this computed state. 
 | `alert` | Opens/activates the parent event's alert state |
 | `clear-alert` | Closes/clears the parent event's alert state |
 
-For an incident-oriented event, `alert` can represent an active incident and `clear-alert` its resolution. This is the only lifecycle-like state that the application currently derives and filters. The API has a dedicated star toggle, but alert transitions are created through the generic `POST /api/v1/events` endpoint.
+For an incident-oriented event, `alert` can represent an active incident and `clear-alert` its resolution. This annotation state is independent of the phase-based logical-operation state described below. The API has a dedicated star toggle, but alert transitions are created through the generic `POST /api/v1/events` endpoint.
 
 ### Open and resolve an alert
 
@@ -230,9 +256,9 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 }'
 ```
 
-### Lifecycle via linked events
+### Current operations via linked phase events
 
-A deployment lifecycle (or any multi-phase operation) can be recorded as separate top-level events sharing an identifier tag rather than as a single event with start/end timestamps:
+A deployment lifecycle (or any multi-phase operation) is recorded as separate immutable top-level events sharing an identifier tag rather than as a single mutable event. Use `change_id` for new producers; `deploy_id` remains supported for existing deployment producers:
 
 ```bash
 # Deploy started
@@ -240,25 +266,35 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "user_name": "alice",
   "description": "deploy v1.2 started",
-  "tags": {"deploy_id": "abc123", "phase": "start", "env": "prod"}
+  "tags": {"change_id": "deploy-abc123", "phase": "start", "team": "payments", "scope": "service", "severity": "sev2", "env": "prod"}
 }'
 
-# Deploy completed (separate event, same deploy_id tag)
+# Deploy completed (separate event, same change_id tag)
 pcr -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "user_name": "alice",
   "description": "deploy v1.2 completed",
-  "tags": {"deploy_id": "abc123", "phase": "end", "env": "prod"}
+  "tags": {"change_id": "deploy-abc123", "phase": "end"}
 }'
 ```
 
 Query by tag to see the full lifecycle:
 
 ```bash
-pcr "http://localhost:8080/api/v1/events?tag=deploy_id:abc123"
+pcr "http://localhost:8080/api/v1/events?tag=change_id:deploy-abc123"
 ```
 
-This convention records that a start and end happened, but the application does not pair or reduce `phase=start` and `phase=end` into current state. Both appear as separate dashboard rows. Only the `alert`/`clear-alert` pair has built-in current-state calculation.
+History retains both rows. Current includes the start until a top-level end event has the same event type and correlation identifier. Exact lowercase `phase=start` and `phase=end` values participate. If both identifier tags exist, non-empty `change_id` takes precedence; an empty `change_id` falls back to non-empty `deploy_id`. Events without a usable identifier remain in History but cannot enter Current.
+
+Each logical identifier represents one start/end cycle. Duplicate starts collapse to the earliest `timestamp`, then `id`; any matching end closes the logical operation. Give a restarted operation a new logical identifier. Retries should instead reuse a stable, phase-specific `external_id`.
+
+Display and visibility tags come from the representative start event:
+
+- `team` identifies the owning team. Missing or empty values are shown as unattributed and are visible to every team.
+- `scope=site` marks site-wide work, which is visible to every team.
+- `severity` conventionally uses lowercase `sev0` through `sev3`; reads are case-insensitive for compatibility with existing `SEV0` producers.
+
+A tag key may appear at most once on an event. The database enforces this invariant. End events need only `phase`, the matching correlation identifier, and the same event type.
 
 ## Idempotency
 
@@ -312,6 +348,9 @@ Both requests return the same event (same `id`, same `created_at`). The second r
 
 The built-in HTML dashboard is served at `/`. Authenticate by navigating to `/login` and entering your API token in the form — this sets a session cookie and redirects to the dashboard. The cookie is valid for 24 hours. It provides:
 
+- A Current view for active team, unattributed, and site-wide work with no time bound
+- A Site-wide view for active `scope=site` work
+- An independent banner for visible active `sev0` and `sev1` work
 - Time range buttons to filter events by predefined windows (last 5 minutes, 30 minutes, 1 hour, and 24 hours)
 - Clickable tags that filter the event list to matching events
 - A star toggle on each event (creates star/unstar meta-events behind the scenes)
@@ -319,7 +358,32 @@ The built-in HTML dashboard is served at `/`. Authenticate by navigating to `/lo
 - Event detail page showing the event and its current derived star/alert state
 - Auto-refresh at a configurable interval (see `PCR_DASHBOARD_REFRESH_SEC`)
 
-The dashboard always requests top-level events and defaults to events timestamped within the last 24 hours. Its Alerts filter combines current alert state with the selected time range; it is not an unbounded list of all active alerts. Use the API query shown above when an unbounded result is required.
+The landing page remains the 24-hour History view. Current and Site-wide are explicit, unbounded views. Alerts combines current alert annotation state with the selected History time range; use the API query shown above when an unbounded list of alerted events is required.
+
+### Seeded interface preview
+
+The shared functional fixture contains active, completed, duplicate-delivery, site-wide, unattributed, high-severity, starred, and alerted records. Its timestamps are relative to seed time, so the 24-hour History view remains useful whenever it is run.
+
+Start a disposable server in one shell:
+
+```bash
+DEMO_DIR=$(mktemp -d)
+PCR_API_TOKENS=demo-token \
+PCR_SESSION_SECRET=demo-session-secret-with-padding-123 \
+PCR_COOKIE_SECURE=false \
+PCR_REQUIRE_AUTH_READS=false \
+PCR_DATABASE_PATH="$DEMO_DIR/registry.db" \
+PCR_ADDR=:18082 \
+go run ./cmd/server
+```
+
+Seed it from another shell, then open `http://127.0.0.1:18082/?view=current&team=payments`:
+
+```bash
+make seed-demo
+```
+
+The fixture is [testdata/functional/phosphor-demo.json](testdata/functional/phosphor-demo.json). The three interface fonts are vendored under `web/static/fonts/` and the rendered pages do not contact a remote font host.
 
 ## Data Model
 
@@ -335,10 +399,11 @@ Events are immutable. There are no update or delete operations. The core `Change
 | `event_type` | string | Category: `deployment`, `feature-flag`, `k8s-change`, or custom. Meta-events use `star`, `unstar`, `alert`, `clear-alert` |
 | `description` | string | Short summary |
 | `long_description` | string | Detailed description |
-| `tags` | map[string]string | Arbitrary key-value metadata for filtering and lifecycle linking |
+| `links` | array of `{label, url}` | Ordered external references. Labels are optional; URLs must be absolute HTTP(S) URLs |
+| `tags` | map[string]string | Arbitrary key-value metadata for filtering and lifecycle linking; each key is unique within an event |
 | `created_at` | RFC 3339 | Record creation time |
 
-There are no mutable `timestamp_start`, `timestamp_end`, `starred`, `alerted`, or `updated_at` fields. Point-in-time lifecycle records use the single `timestamp` field and shared tags. Star and alert state are derived from meta-events. Events do not change after creation.
+There are no mutable `timestamp_start`, `timestamp_end`, `starred`, `alerted`, or `updated_at` fields. Point-in-time lifecycle records use the single `timestamp` field and shared tags. Current logical-operation state is derived from top-level phase events; star and alert state are derived independently from meta-events. Events do not change after creation.
 
 ## Architecture
 

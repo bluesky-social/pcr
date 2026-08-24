@@ -31,6 +31,7 @@ func applyTestMigrations(t *testing.T, db *sql.DB) {
 	ctx := t.Context()
 	migrationFiles := []string{
 		"001_create_change_events.up.sql",
+		"002_create_change_event_links.up.sql",
 	}
 	for _, name := range migrationFiles {
 		sqlBytes, err := fs.ReadFile(migrations.FS, name)
@@ -113,8 +114,12 @@ func TestCreate(t *testing.T) {
 			EventType:       model.EventTypeDeployment,
 			Description:     "deploy v1.2.3",
 			LongDescription: "Rolling deploy of service-foo to v1.2.3",
-			Tags:            map[string]string{"env": "prod", "service": "foo", "region": "us-east-1"},
-			CreatedAt:       ts,
+			Links: []model.EventLink{
+				{Label: "PagerDuty incident", URL: "https://example.pagerduty.com/incidents/PABC"},
+				{Label: "Rollout PR", URL: "https://github.com/example/service-foo/pull/123"},
+			},
+			Tags:      map[string]string{"env": "prod", "service": "foo", "region": "us-east-1"},
+			CreatedAt: ts,
 		}
 
 		got, err := s.Create(ctx, ev)
@@ -143,6 +148,9 @@ func TestCreate(t *testing.T) {
 		if got.ParentID != "" {
 			t.Errorf("ParentID = %q, want empty", got.ParentID)
 		}
+		if len(got.Links) != 2 || got.Links[0].Label != "PagerDuty incident" || got.Links[1].Label != "Rollout PR" {
+			t.Errorf("created Links = %#v, want both links in order", got.Links)
+		}
 		if len(got.Tags) != 3 {
 			t.Fatalf("len(Tags) = %d, want 3", len(got.Tags))
 		}
@@ -150,6 +158,14 @@ func TestCreate(t *testing.T) {
 			if got.Tags[k] != v {
 				t.Errorf("Tags[%q] = %q, want %q", k, got.Tags[k], v)
 			}
+		}
+
+		stored, err := s.GetByID(ctx, ev.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if len(stored.Links) != 2 || stored.Links[0].URL != ev.Links[0].URL || stored.Links[1].URL != ev.Links[1].URL {
+			t.Errorf("stored Links = %#v, want %#v", stored.Links, ev.Links)
 		}
 	})
 
@@ -239,6 +255,56 @@ func TestCreate(t *testing.T) {
 			t.Errorf("len(Tags) = %d, want 0", len(got.Tags))
 		}
 	})
+}
+
+func TestChangeEventTagKeysAreUnique(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db := openTestDB(t, dbPath)
+	applyTestMigrations(t, db)
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("db close: %v", err)
+		}
+	})
+
+	_, err := db.ExecContext(
+		t.Context(),
+		`INSERT INTO change_events
+		 (id, user_name, timestamp, event_type, description, long_description, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"event-with-tag",
+		"alice",
+		"2026-08-24T12:00:00Z",
+		model.EventTypeDeployment,
+		"test event",
+		"",
+		"2026-08-24T12:00:00Z",
+	)
+	if err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, err := db.ExecContext(
+		t.Context(),
+		`INSERT INTO change_event_tags (event_id, key, value) VALUES (?, ?, ?)`,
+		"event-with-tag",
+		"team",
+		"payments",
+	); err != nil {
+		t.Fatalf("insert first tag: %v", err)
+	}
+
+	_, err = db.ExecContext(
+		t.Context(),
+		`INSERT INTO change_event_tags (event_id, key, value) VALUES (?, ?, ?)`,
+		"event-with-tag",
+		"team",
+		"platform",
+	)
+	if err == nil {
+		t.Fatal("inserting a second value for one event tag key succeeded")
+	}
 }
 
 func TestCreateReturnsCanonicalDefensiveCopy(t *testing.T) {
@@ -884,6 +950,162 @@ func TestList(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestListCurrent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("derives active logical operations", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		base := mustTime(t, "2020-01-01T00:00:00Z")
+		events := []*model.ChangeEvent{
+			makeEvent("active-change", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "active"}),
+			makeEvent("completed-start", "alice", "deployment", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "completed"}),
+			makeEvent("completed-end", "bob", "deployment", base.Add(2*time.Minute), map[string]string{"phase": "end", "change_id": "completed"}),
+			makeEvent("wrong-end-start", "alice", "deployment", base.Add(3*time.Minute), map[string]string{"phase": "start", "change_id": "still-active"}),
+			makeEvent("wrong-end", "bob", "deployment", base.Add(4*time.Minute), map[string]string{"phase": "end", "change_id": "another-id"}),
+			makeEvent("type-start", "alice", "maintenance", base.Add(5*time.Minute), map[string]string{"phase": "start", "change_id": "shared-id"}),
+			makeEvent("type-end", "bob", "deployment", base.Add(6*time.Minute), map[string]string{"phase": "end", "change_id": "shared-id"}),
+			makeEvent("legacy", "alice", "deployment", base.Add(7*time.Minute), map[string]string{"phase": "start", "deploy_id": "legacy-id"}),
+			makeEvent("precedence", "alice", "deployment", base.Add(8*time.Minute), map[string]string{"phase": "start", "change_id": "canonical-id", "deploy_id": "legacy-conflict"}),
+			makeEvent("legacy-conflict-end", "bob", "deployment", base.Add(9*time.Minute), map[string]string{"phase": "end", "deploy_id": "legacy-conflict"}),
+			makeEvent("fallback", "alice", "deployment", base.Add(10*time.Minute), map[string]string{"phase": "start", "change_id": "", "deploy_id": "fallback-id"}),
+			makeEvent("missing-id", "alice", "deployment", base.Add(11*time.Minute), map[string]string{"phase": "start"}),
+			makeEvent("empty-ids", "alice", "deployment", base.Add(12*time.Minute), map[string]string{"phase": "start", "change_id": "", "deploy_id": ""}),
+			makeEvent("duplicate-earliest", "alice", "deployment", base.Add(13*time.Minute), map[string]string{"phase": "start", "change_id": "duplicate"}),
+			makeEvent("duplicate-later", "alice", "deployment", base.Add(14*time.Minute), map[string]string{"phase": "start", "change_id": "duplicate"}),
+			makeEvent("closed-duplicate-a", "alice", "deployment", base.Add(15*time.Minute), map[string]string{"phase": "start", "change_id": "closed-duplicate"}),
+			makeEvent("closed-duplicate-b", "alice", "deployment", base.Add(16*time.Minute), map[string]string{"phase": "start", "change_id": "closed-duplicate"}),
+			makeEvent("closed-duplicate-end", "bob", "deployment", base.Add(17*time.Minute), map[string]string{"phase": "end", "change_id": "closed-duplicate"}),
+			makeEvent("meta-parent", "alice", "deployment", base.Add(18*time.Minute), nil),
+		}
+		meta := makeEvent("phase-meta", "alice", "deployment", base.Add(19*time.Minute), map[string]string{"phase": "start", "change_id": "meta-id"})
+		meta.ParentID = "meta-parent"
+		events = append(events, meta)
+		createCurrentFixtures(t, s, events...)
+
+		result, err := s.ListCurrent(t.Context(), model.CurrentParams{})
+		if err != nil {
+			t.Fatalf("ListCurrent() error = %v", err)
+		}
+
+		wantIDs := []string{
+			"duplicate-earliest",
+			"fallback",
+			"precedence",
+			"legacy",
+			"type-start",
+			"wrong-end-start",
+			"active-change",
+		}
+		assertEventIDs(t, result.Events, wantIDs)
+		if result.TotalCount != len(wantIDs) {
+			t.Errorf("TotalCount = %d, want %d", result.TotalCount, len(wantIDs))
+		}
+		if result.Events[0].Tags["change_id"] != "duplicate" {
+			t.Errorf("representative tags = %v, want hydrated duplicate start tags", result.Events[0].Tags)
+		}
+	})
+
+	t.Run("filters visibility and values after reduction", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		base := mustTime(t, "2026-08-24T10:00:00Z")
+		createCurrentFixtures(
+			t,
+			s,
+			makeEvent("payments-sev0", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "p0", "team": "payments", "scope": "service", "severity": "SEV0"}),
+			makeEvent("payments-sev1", "alice", "maintenance", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "p1", "team": "payments", "scope": "system", "severity": "sev1"}),
+			makeEvent("site-platform", "bob", "incident", base.Add(2*time.Minute), map[string]string{"phase": "start", "change_id": "site", "team": "platform", "scope": "site", "severity": "sev1"}),
+			makeEvent("unattributed", "carol", "deployment", base.Add(3*time.Minute), map[string]string{"phase": "start", "change_id": "none", "scope": "service", "severity": "sev2"}),
+			makeEvent("empty-team", "carol", "deployment", base.Add(4*time.Minute), map[string]string{"phase": "start", "change_id": "empty", "team": "", "scope": "service", "severity": "sev3"}),
+			makeEvent("platform-service", "bob", "deployment", base.Add(5*time.Minute), map[string]string{"phase": "start", "change_id": "platform", "team": "platform", "scope": "service", "severity": "sev0"}),
+			makeEvent("no-severity", "alice", "deployment", base.Add(6*time.Minute), map[string]string{"phase": "start", "change_id": "no-sev", "team": "payments", "scope": "service"}),
+		)
+
+		teamResult, err := s.ListCurrent(t.Context(), model.CurrentParams{ForTeam: "payments"})
+		if err != nil {
+			t.Fatalf("ListCurrent(ForTeam) error = %v", err)
+		}
+		assertEventIDs(t, teamResult.Events, []string{"no-severity", "empty-team", "unattributed", "site-platform", "payments-sev1", "payments-sev0"})
+
+		severityResult, err := s.ListCurrent(t.Context(), model.CurrentParams{
+			ForTeam:    "payments",
+			Severities: []string{"sev0", "SEV1"},
+		})
+		if err != nil {
+			t.Fatalf("ListCurrent(Severities) error = %v", err)
+		}
+		assertEventIDs(t, severityResult.Events, []string{"site-platform", "payments-sev1", "payments-sev0"})
+
+		scopeResult, err := s.ListCurrent(t.Context(), model.CurrentParams{Scopes: []string{"site", "system"}})
+		if err != nil {
+			t.Fatalf("ListCurrent(Scopes) error = %v", err)
+		}
+		assertEventIDs(t, scopeResult.Events, []string{"site-platform", "payments-sev1"})
+
+		typeResult, err := s.ListCurrent(t.Context(), model.CurrentParams{EventType: "maintenance"})
+		if err != nil {
+			t.Fatalf("ListCurrent(EventType) error = %v", err)
+		}
+		assertEventIDs(t, typeResult.Events, []string{"payments-sev1"})
+	})
+
+	t.Run("paginates the deduplicated deterministic result", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		base := mustTime(t, "2026-08-24T12:00:00Z")
+		createCurrentFixtures(
+			t,
+			s,
+			makeEvent("a", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "a"}),
+			makeEvent("b", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "b"}),
+			makeEvent("b-duplicate", "alice", "deployment", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "b"}),
+			makeEvent("c", "alice", "deployment", base.Add(2*time.Minute), map[string]string{"phase": "start", "change_id": "c"}),
+		)
+
+		first, err := s.ListCurrent(t.Context(), model.CurrentParams{Limit: 2})
+		if err != nil {
+			t.Fatalf("ListCurrent(first page) error = %v", err)
+		}
+		assertEventIDs(t, first.Events, []string{"c", "a"})
+		if first.TotalCount != 3 {
+			t.Errorf("first.TotalCount = %d, want 3", first.TotalCount)
+		}
+
+		second, err := s.ListCurrent(t.Context(), model.CurrentParams{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("ListCurrent(second page) error = %v", err)
+		}
+		assertEventIDs(t, second.Events, []string{"b"})
+		if second.TotalCount != 3 {
+			t.Errorf("second.TotalCount = %d, want 3", second.TotalCount)
+		}
+	})
+}
+
+func createCurrentFixtures(t *testing.T, s *sqlite.Store, events ...*model.ChangeEvent) {
+	t.Helper()
+	for _, event := range events {
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(%q) error = %v", event.ID, err)
+		}
+	}
+}
+
+func assertEventIDs(t *testing.T, events []model.ChangeEvent, want []string) {
+	t.Helper()
+	got := make([]string, len(events))
+	for i := range events {
+		got[i] = events[i].ID
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("event IDs = %v, want %v", got, want)
+	}
 }
 
 // ---------------------------------------------------------------------------

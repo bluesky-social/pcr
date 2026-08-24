@@ -1,5 +1,5 @@
 {{define "content"}}
-<div class="detail-page">
+<div class="detail-page instrument-housing">
     <a href="/" class="back-link">&larr; Back to dashboard</a>
 
     <h2>Event Details</h2>
@@ -34,6 +34,15 @@
 
         <dt>Long Description</dt>
         <dd><pre><code>{{.Event.LongDescription}}</code></pre></dd>
+
+        <dt>Links</dt>
+        <dd>
+            {{if .Event.Links}}
+            <ul class="event-links">
+                {{range .Event.Links}}<li><a href="{{.URL}}" target="_blank" rel="noreferrer">{{if .Label}}{{.Label}}{{else}}{{.URL}}{{end}}</a></li>{{end}}
+            </ul>
+            {{else}}&mdash;{{end}}
+        </dd>
 
         <dt>Tags</dt>
         <dd>

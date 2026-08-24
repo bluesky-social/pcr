@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +16,7 @@ import (
 var (
 	ErrUserNameRequired  = errors.New("user_name is required")
 	ErrEventTypeRequired = errors.New("event_type is required")
+	ErrInvalidLink       = errors.New("links must use absolute http or https URLs")
 	ErrEventNotFound     = errors.New("event not found")
 	ErrParentNotFound    = errors.New("parent event not found")
 )
@@ -31,6 +35,12 @@ func (s *ChangeService) Create(ctx context.Context, req *model.CreateChangeReque
 	}
 	if req.EventType == "" {
 		return nil, ErrEventTypeRequired
+	}
+	for _, link := range req.Links {
+		parsed, err := url.Parse(link.URL)
+		if err != nil || link.URL != strings.TrimSpace(link.URL) || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return nil, ErrInvalidLink
+		}
 	}
 
 	// If this is a meta-event, verify the parent exists.
@@ -64,6 +74,7 @@ func (s *ChangeService) Create(ctx context.Context, req *model.CreateChangeReque
 		EventType:       req.EventType,
 		Description:     req.Description,
 		LongDescription: req.LongDescription,
+		Links:           slices.Clone(req.Links),
 		Tags:            tags,
 		CreatedAt:       now,
 	}
@@ -89,6 +100,12 @@ func (s *ChangeService) GetByID(ctx context.Context, id string) (*model.ChangeEv
 func (s *ChangeService) List(ctx context.Context, params model.ListParams) (*model.ListResult, error) {
 	params.Limit = params.EffectiveLimit()
 	return s.store.List(ctx, params)
+}
+
+// ListCurrent returns active logical operations derived from immutable phase events.
+func (s *ChangeService) ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error) {
+	params.Limit = params.EffectiveLimit()
+	return s.store.ListCurrent(ctx, params)
 }
 
 func (s *ChangeService) GetAnnotations(ctx context.Context, eventID string) (*model.EventAnnotations, error) {

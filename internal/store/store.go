@@ -21,6 +21,7 @@ type ChangeStore interface {
 	ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	GetByID(ctx context.Context, id string) (*model.ChangeEvent, error)
 	List(ctx context.Context, params model.ListParams) (*model.ListResult, error)
+	ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
 	GetAnnotations(ctx context.Context, eventID string) (*model.EventAnnotations, error)
 	GetAnnotationsBatch(ctx context.Context, eventIDs []string) (map[string]*model.EventAnnotations, error)
 	Close() error

@@ -31,6 +31,9 @@ func TestParseDashboardRequest(t *testing.T) {
 		if f.Range != "24h" {
 			t.Errorf("filters.Range = %q, want 24h", f.Range)
 		}
+		if f.View != "history" {
+			t.Errorf("filters.View = %q, want history", f.View)
+		}
 		if p.StartAfter == nil {
 			t.Fatal("expected StartAfter to be set for default 24h range")
 		}
@@ -82,6 +85,70 @@ func TestParseDashboardRequest(t *testing.T) {
 		}
 		if len(f.Tags) != 2 {
 			t.Errorf("filters.Tags len = %d, want 2", len(f.Tags))
+		}
+	})
+
+	t.Run("current view has no time bound and parses team filters", func(t *testing.T) {
+		t.Parallel()
+
+		r := httptest.NewRequestWithContext(
+			t.Context(),
+			http.MethodGet,
+			"/?view=current&team=payments&type=deployment&scope=service&severity=sev0&severity=sev1",
+			nil,
+		)
+		p, f := parseDashboardRequest(r)
+
+		if f.View != "current" || f.Team != "payments" {
+			t.Errorf("View/Team = %q/%q, want current/payments", f.View, f.Team)
+		}
+		if p.StartAfter != nil || p.StartBefore != nil {
+			t.Errorf("current time bounds = %v/%v, want nil/nil", p.StartAfter, p.StartBefore)
+		}
+		if p.EventType != "deployment" {
+			t.Errorf("EventType = %q, want deployment", p.EventType)
+		}
+		if len(f.Scopes) != 1 || f.Scopes[0] != "service" {
+			t.Errorf("Scopes = %v, want [service]", f.Scopes)
+		}
+		if len(f.Severities) != 2 {
+			t.Errorf("Severities = %v, want two values", f.Severities)
+		}
+	})
+
+	t.Run("site view has no time bound", func(t *testing.T) {
+		t.Parallel()
+
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/?view=site", nil)
+		p, f := parseDashboardRequest(r)
+		if f.View != "site" {
+			t.Errorf("View = %q, want site", f.View)
+		}
+		if p.StartAfter != nil || p.StartBefore != nil {
+			t.Errorf("site time bounds = %v/%v, want nil/nil", p.StartAfter, p.StartBefore)
+		}
+	})
+
+	t.Run("legacy alerted URL selects alerts view", func(t *testing.T) {
+		t.Parallel()
+
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/?alerted=true", nil)
+		p, f := parseDashboardRequest(r)
+		if f.View != "alerts" || !f.Alerted || !p.AlertedOnly {
+			t.Errorf("legacy alerts params = %+v filters = %+v", p, f)
+		}
+		if p.StartAfter == nil {
+			t.Error("legacy alerts view lost its default 24h range")
+		}
+	})
+
+	t.Run("explicit alerts view enables alert filtering", func(t *testing.T) {
+		t.Parallel()
+
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/?view=alerts", nil)
+		p, f := parseDashboardRequest(r)
+		if f.View != "alerts" || !p.AlertedOnly {
+			t.Errorf("alerts params = %+v filters = %+v", p, f)
 		}
 	})
 }

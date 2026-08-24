@@ -3,7 +3,7 @@ LDFLAGS := -ldflags "-X main.Version=$(VERSION)"
 
 .DEFAULT_GOAL := build
 
-.PHONY: build clean test test-short coverage lint fmt run vet audit smoke smoke-docker
+.PHONY: build clean test test-short coverage lint fmt run vet audit smoke smoke-docker seed-demo
 
 build:
 	go build $(LDFLAGS) -o bin/pcr-server ./cmd/server
@@ -47,12 +47,17 @@ audit:
 SMOKE_TOKEN ?= smoke-token-abc
 SMOKE_DOCKER_URL ?= http://localhost:8080
 SMOKE_DOCKER_TOKEN ?= changeme
+DEMO_URL ?= http://127.0.0.1:18082
+DEMO_TOKEN ?= demo-token
 
 smoke:
 	go run ./cmd/smoke --start-local --token=$(SMOKE_TOKEN)
 
 smoke-docker:
 	go run ./cmd/smoke --base-url=$(SMOKE_DOCKER_URL) --token=$(SMOKE_DOCKER_TOKEN)
+
+seed-demo:
+	go run ./cmd/seed --base-url=$(DEMO_URL) --token=$(DEMO_TOKEN) --fixture=testdata/functional/phosphor-demo.json
 
 # Docker targets
 .PHONY: docker-build docker-run docker-compose-up docker-compose-down

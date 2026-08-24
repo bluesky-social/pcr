@@ -24,6 +24,7 @@ type mockStore struct {
 	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
+	listCurrentFn         func(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
 	getAnnotationsBatchFn func(ctx context.Context, eventIDs []string) (map[string]*model.EventAnnotations, error)
 }
@@ -58,6 +59,13 @@ func (m *mockStore) List(ctx context.Context, params model.ListParams) (*model.L
 	panic("unexpected call to List")
 }
 
+func (m *mockStore) ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error) {
+	if m.listCurrentFn != nil {
+		return m.listCurrentFn(ctx, params)
+	}
+	panic("unexpected call to ListCurrent")
+}
+
 func (m *mockStore) GetAnnotations(ctx context.Context, eventID string) (*model.EventAnnotations, error) {
 	if m.getAnnotationsFn != nil {
 		return m.getAnnotationsFn(ctx, eventID)
@@ -87,6 +95,14 @@ func newTestRouter(t *testing.T, requireAuthReads bool) (http.Handler, *mockStor
 	now := time.Now().UTC()
 	ms := &mockStore{
 		listFn: func(_ context.Context, _ model.ListParams) (*model.ListResult, error) {
+			return &model.ListResult{
+				Events:     []model.ChangeEvent{},
+				TotalCount: 0,
+				Limit:      50,
+				Offset:     0,
+			}, nil
+		},
+		listCurrentFn: func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
 			return &model.ListResult{
 				Events:     []model.ChangeEvent{},
 				TotalCount: 0,
@@ -165,6 +181,11 @@ func TestAuthEnforcement(t *testing.T) {
 				name:   "GET /api/v1/events without auth",
 				method: http.MethodGet,
 				path:   "/api/v1/events",
+			},
+			{
+				name:   "GET /api/v1/current without auth",
+				method: http.MethodGet,
+				path:   "/api/v1/current",
 			},
 			{
 				name:   "GET /api/v1/events/{id} without auth",
@@ -337,6 +358,26 @@ func TestAuthEnforcement(t *testing.T) {
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("current endpoint follows read authentication setting", func(t *testing.T) {
+		t.Parallel()
+
+		requiredRouter, _ := newTestRouter(t, true)
+		authenticated := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/current?token="+testToken, nil)
+		authenticatedRec := httptest.NewRecorder()
+		requiredRouter.ServeHTTP(authenticatedRec, authenticated)
+		if authenticatedRec.Code != http.StatusOK {
+			t.Errorf("authenticated status = %d, want 200", authenticatedRec.Code)
+		}
+
+		optionalRouter, _ := newTestRouter(t, false)
+		unauthenticated := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/current", nil)
+		unauthenticatedRec := httptest.NewRecorder()
+		optionalRouter.ServeHTTP(unauthenticatedRec, unauthenticated)
+		if unauthenticatedRec.Code != http.StatusOK {
+			t.Errorf("optional-auth status = %d, want 200", unauthenticatedRec.Code)
 		}
 	})
 

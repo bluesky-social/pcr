@@ -184,13 +184,24 @@ func TestRunMigrationsCreatesFreshSchema(t *testing.T) {
 		t.Errorf("external_id index count = %d, want 1", externalIDIndexes)
 	}
 
+	var linkTables int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'table' AND name = 'change_event_links'
+	`).Scan(&linkTables); err != nil {
+		t.Fatalf("inspect change_event_links table: %v", err)
+	}
+	if linkTables != 1 {
+		t.Errorf("change_event_links table count = %d, want 1", linkTables)
+	}
+
 	var version int
 	var dirty bool
 	if err := db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
 		t.Fatalf("read migration state: %v", err)
 	}
-	if version != 1 || dirty {
-		t.Errorf("migration state = (version=%d, dirty=%t), want (version=1, dirty=false)", version, dirty)
+	if version != 2 || dirty {
+		t.Errorf("migration state = (version=%d, dirty=%t), want (version=2, dirty=false)", version, dirty)
 	}
 }
 
