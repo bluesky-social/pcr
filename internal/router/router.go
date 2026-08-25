@@ -14,7 +14,7 @@ import (
 )
 
 // New creates and configures a chi.Mux with all application routes and middleware.
-func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, loginHandler *handler.LoginHandler, cfg *config.Config) *chi.Mux {
+func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, humanAuthHandler *handler.HumanAuthHandler, cfg *config.Config) *chi.Mux {
 	r := chi.NewRouter()
 
 	// Global middleware (applied to all routes including static files).
@@ -30,8 +30,9 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Get("/livez", apiHandler.Liveness)
 	r.Get("/readyz", apiHandler.Readiness)
 	r.Get("/api/v1/health", apiHandler.HealthCheck)
-	r.Get("/login", loginHandler.ShowLoginForm)
-	r.Post("/login", loginHandler.Login)
+	r.Get("/login", humanAuthHandler.ShowLogin)
+	r.Get("/auth/start", humanAuthHandler.Start)
+	r.Get("/auth/callback", humanAuthHandler.Callback)
 
 	// API routes accept explicit tokens only. Browser session cookies are scoped
 	// to dashboard routes so ambient cookie authority cannot authenticate API
@@ -51,9 +52,13 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 		r.Post("/api/v1/events/{id}/close", apiHandler.CloseOperation)
 	})
 
-	// Dashboard routes accept browser sessions as well as explicit tokens.
+	// Dashboard routes accept only locally validated human sessions.
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(cfg.APITokens, cfg.RequireAuthReads, cfg.SessionSecret))
+		if principalForRequest := humanAuthHandler.TrustedRequestPrincipal(); principalForRequest != nil {
+			r.Use(middleware.RequireBoundHumanAuth(cfg.SessionSecret, humanAuthHandler.IdentityProvider(), principalForRequest))
+		} else {
+			r.Use(middleware.RequireHumanAuth(cfg.SessionSecret, humanAuthHandler.IdentityProvider()))
+		}
 
 		r.Get("/", dashHandler.Dashboard)
 		r.Get("/events/{id}", dashHandler.Detail)
@@ -62,6 +67,11 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 		r.Post("/events/{id}/links", dashHandler.AddLinks)
 		r.Post("/events/{id}/close", dashHandler.CloseOperation)
 	})
+
+	// Logout needs only the signed local session plus the handler's CSRF check.
+	// Requiring the current Beyond group would prevent a revoked user from
+	// clearing the now-unusable local cookie.
+	r.With(middleware.RequireHumanAuth(cfg.SessionSecret, humanAuthHandler.IdentityProvider())).Post("/logout", humanAuthHandler.Logout)
 
 	return r
 }

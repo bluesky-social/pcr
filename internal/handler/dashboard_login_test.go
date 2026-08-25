@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sarah/go-prod-change-registry/internal/handler"
+	"github.com/sarah/go-prod-change-registry/internal/humanauth"
 	"github.com/sarah/go-prod-change-registry/internal/middleware"
 	"github.com/sarah/go-prod-change-registry/internal/model"
 	"github.com/sarah/go-prod-change-registry/internal/service"
@@ -62,6 +63,22 @@ func newDashboardTestStack() *dashboardStack {
 	h := handler.NewDashboardHandler(svc, 60, dashboardSessionSecret)
 
 	r := chi.NewRouter()
+	cookieRecorder := httptest.NewRecorder()
+	if err := middleware.SetHumanSessionCookie(cookieRecorder, middleware.HumanSessionOptions{
+		Secret: dashboardSessionSecret, Duration: time.Hour,
+	}, humanauth.Principal{Provider: "github", Subject: "12345", UserName: "alice"}); err != nil {
+		panic(err)
+	}
+	testCookie := cookieRecorder.Result().Cookies()[0]
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := r.Cookie(middleware.SessionCookieName); err != nil {
+				r.AddCookie(testCookie)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	r.Use(middleware.RequireHumanAuth(dashboardSessionSecret, "github"))
 	r.Get("/", h.Dashboard)
 	r.Get("/events/{id}", h.Detail)
 	r.Post("/events/{id}/star", h.ToggleStar)
@@ -86,16 +103,21 @@ func addCSRFToRequest(t *testing.T, req *http.Request) {
 
 func addCSRFFormToRequest(t *testing.T, req *http.Request, values url.Values) {
 	t.Helper()
-	opts := middleware.SessionOptions{Secret: dashboardSessionSecret}
 	rec := httptest.NewRecorder()
-	middleware.SetSessionCookie(rec, opts)
+	err := middleware.SetHumanSessionCookie(rec, middleware.HumanSessionOptions{
+		Secret: dashboardSessionSecret, Duration: time.Hour,
+	}, humanauth.Principal{Provider: "github", Subject: "12345", UserName: "alice"})
+	if err != nil {
+		t.Fatalf("SetHumanSessionCookie(): %v", err)
+	}
 	for _, c := range rec.Result().Cookies() {
 		req.AddCookie(c)
 	}
-	nonce := rec.Result().Cookies()[0].Value
-	// Extract nonce from the cookie value (first colon-separated part).
-	parts := strings.SplitN(nonce, ":", 3)
-	csrfToken := middleware.GenerateCSRFToken(dashboardSessionSecret, parts[0])
+	session, err := middleware.ReadHumanSession(req, dashboardSessionSecret, "github")
+	if err != nil {
+		t.Fatalf("ReadHumanSession(): %v", err)
+	}
+	csrfToken := middleware.GenerateCSRFToken(dashboardSessionSecret, session.Nonce)
 
 	values.Set("csrf_token", csrfToken)
 	body := values.Encode()
@@ -751,6 +773,9 @@ func TestDashboardEventActions(t *testing.T) {
 		}
 		if annotation == nil || len(annotation.Links) != 2 || annotation.Links[1].Label != "PR" {
 			t.Errorf("annotation = %+v", annotation)
+		}
+		if annotation.UserName != "alice" || annotation.UserProvider != "github" || annotation.UserSubject != "12345" {
+			t.Errorf("annotation identity = %q/%q/%q, want alice/github/12345", annotation.UserName, annotation.UserProvider, annotation.UserSubject)
 		}
 	})
 

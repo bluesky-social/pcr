@@ -5,10 +5,13 @@ A lightweight, append-only change registry for production environments. It recor
 ## Quickstart
 
 ```bash
-PCR_API_TOKENS=my-secret-token docker compose up -d --build
+PCR_API_TOKENS=my-secret-token \
+PCR_OAUTH_CLIENT_ID=your-github-oauth-client-id \
+PCR_OAUTH_CLIENT_SECRET=your-github-oauth-client-secret \
+docker compose up -d --build
 ```
 
-The server starts on `:8080` by default. Navigate to `http://localhost:8080/login` and enter your token to access the dashboard.
+Register `http://localhost:8080/auth/callback` on the selected provider first. The server starts on `:8080`; navigate to `http://localhost:8080/login` and sign in with the configured provider. Compose defaults to GitHub and unrestricted authenticated users for local development only.
 
 ## Configuration
 
@@ -17,6 +20,15 @@ All configuration is via environment variables prefixed with `PCR_`.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PCR_API_TOKENS` | Yes | -- | Comma-separated list of valid API tokens |
+| `PCR_HUMAN_AUTH_PROVIDER` | Yes | -- | Exactly one dashboard identity provider: `github`, `google`, `authentik`, or trusted proxy `beyond` |
+| `PCR_PUBLIC_URL` | Yes | -- | Canonical external origin used to build `/auth/callback`; HTTPS required except on loopback |
+| `PCR_OAUTH_CLIENT_ID` | Except Beyond | -- | OAuth client ID registered with the selected provider |
+| `PCR_OAUTH_CLIENT_SECRET` | Except Beyond | -- | OAuth client secret registered with the selected provider |
+| `PCR_OIDC_ISSUER_URL` | Authentik only | -- | Recommended per-provider issuer, ending in `/application/o/<slug>/` |
+| `PCR_ALLOWED_ORGS` | Conditional | -- | GitHub organizations, Google Workspace domains, or exact Authentik/Beyond groups; comma-separated OR semantics |
+| `PCR_HUMAN_AUTH_ALLOWED_SUBJECTS` | Conditional | -- | Individual exceptions such as `github:12345`, `google:<sub>`, `authentik:<issuer>:<sub>`, or `beyond:<lowercase-email>` |
+| `PCR_HUMAN_AUTH_ALLOW_ANY` | No | `false` | Explicitly allow any identity verified by the selected provider; mutually exclusive with restrictions |
+| `PCR_HUMAN_SESSION_DURATION` | No | `12h` | Absolute, non-sliding human session and provider-policy freshness window; maximum 7 days |
 | `PCR_ADDR` | No | `:8080` | Listen address (`host:port`) |
 | `PCR_DATABASE_URL` | Yes | -- | PostgreSQL connection URL; require TLS outside local development |
 | `PCR_REQUIRE_AUTH_READS` | No | `true` | Require auth for read endpoints (GET) |
@@ -64,14 +76,16 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Dashboard (requires session cookie or token) |
+| `GET` | `/` | Dashboard (requires a human session) |
 | `GET` | `/events/{id}` | Event detail page |
 | `POST` | `/events/{id}/star` | Toggle star (redirects back, requires CSRF token) |
 | `POST` | `/events/{id}/alert` | Toggle alert state (redirects back, requires CSRF token) |
 | `POST` | `/events/{id}/links` | Append external links (redirects back, requires CSRF token) |
 | `POST` | `/events/{id}/close` | Close an open operation (redirects back, requires CSRF token) |
 | `GET` | `/login` | Show login form |
-| `POST` | `/login` | Submit token, set session cookie, redirect to dashboard |
+| `GET` | `/auth/start` | Begin OAuth with the configured provider |
+| `GET` | `/auth/callback` | Validate provider identity and establish a human session |
+| `POST` | `/logout` | Clear the human session (requires CSRF token) |
 
 ### Query parameters for `GET /api/v1/events`
 
@@ -395,7 +409,7 @@ Both requests return the same event (same `id`, same `created_at`). The second r
 
 ## Dashboard
 
-The built-in HTML dashboard is served at `/`. Authenticate by navigating to `/login` and entering your API token in the form — this sets a session cookie and redirects to the dashboard. The cookie is valid for 24 hours. It provides:
+The built-in HTML dashboard is served at `/`. Authenticate through the single GitHub, Google, Authentik, or Beyond provider selected by the installer. OAuth providers establish the locally validated session through their callback; Beyond mode establishes it from trusted proxy headers. It provides:
 
 - A Current view for active team, unattributed, and site-wide work with no time bound
 - A Site-wide view for active `scope=site` work
@@ -422,6 +436,11 @@ PCR_API_TOKENS=demo-token \
 PCR_SESSION_SECRET=demo-session-secret-with-padding-123 \
 PCR_COOKIE_SECURE=false \
 PCR_REQUIRE_AUTH_READS=false \
+PCR_HUMAN_AUTH_PROVIDER=github \
+PCR_PUBLIC_URL=http://127.0.0.1:18082 \
+PCR_OAUTH_CLIENT_ID=replace-with-local-github-client-id \
+PCR_OAUTH_CLIENT_SECRET=replace-with-local-github-client-secret \
+PCR_HUMAN_AUTH_ALLOW_ANY=true \
 PCR_DATABASE_URL='postgres://pcr@127.0.0.1/pcr?sslmode=disable' \
 PCR_ADDR=:18082 \
 go run ./cmd/server
@@ -485,10 +504,10 @@ Four deployment options, from simplest to most production-like:
 
 | Method | Command | Best for |
 |---|---|---|
-| **Binary** | `make build && PCR_API_TOKENS=token PCR_DATABASE_URL=... ./bin/pcr-server` | Local development |
+| **Binary** | `make build` plus database, API-token, and OAuth environment | Local development |
 | **Docker** | `make docker-run` | Containerized local testing |
-| **Docker Compose** | `PCR_API_TOKENS=token docker compose up -d --build` | Local dev with persistence |
-| **Kubernetes (kind)** | `kind create cluster` + `kubectl apply -f k8s/` | Testing k8s deployment |
+| **Docker Compose** | Configure API and OAuth credentials, then `docker compose up -d --build` | Local dev with persistence |
+| **Kubernetes (kind)** | `kind create cluster`, then follow the provider-specific manifest steps | Testing k8s deployment |
 
 See [docs/deployment.md](docs/deployment.md) for full container and Kubernetes instructions. For direct binary setup, see the manual setup in [docs/testing.md](docs/testing.md).
 
@@ -576,25 +595,32 @@ See [docs/testing.md](docs/testing.md) for the smoke-test commands and focused m
 
 ## Auth
 
-The server follows a zero-trust-by-default model for protected routes. With the default `PCR_REQUIRE_AUTH_READS=true`, protected reads and writes require authentication. Setting it to `false` permits unauthenticated `GET` and `HEAD` requests, while protected writes still require authentication. Health, login, and static-asset routes are always public, as listed below.
+The server follows a zero-trust-by-default model. Dashboard routes always require a human session. For API routes, the default `PCR_REQUIRE_AUTH_READS=true` requires authentication for reads and writes; setting it to `false` permits unauthenticated API `GET` and `HEAD` requests while writes still require an explicit API token. Health, login, and static-asset routes are public as listed below.
 
-Authentication is performed via one of three methods (checked in this order):
+API and human authentication are deliberately separate:
 
-1. **Bearer token header:** `Authorization: Bearer <token>` — used by API clients, scripts, CI/CD
-2. **Session cookie:** Set by the `/login` endpoint — accepted only by dashboard routes in browsers; API routes require a Bearer token or query token
-3. **Query parameter:** `?token=<token>` — backwards-compatible fallback
+1. **API clients:** `Authorization: Bearer <token>`, proxy-friendly `Authorization: Token <token>`, or the backwards-compatible `?token=` query parameter on `/api/v1/*`.
+2. **Dashboard users:** GitHub, Google, Authentik, or trusted Beyond identity, selected once at startup, followed by a locally signed PCR session cookie.
+
+API tokens cannot log into the dashboard, and provider OAuth tokens cannot authenticate PCR API routes.
 
 ### Dashboard login
 
-Navigate to `/login` to see the login form. Submit your API token via the form — the token is sent as a POST body (never in the URL). The server validates the token, sets an HttpOnly session cookie (`pcr_session`, 24-hour expiry, `SameSite=Lax`, `Secure` when `PCR_COOKIE_SECURE=true`), and redirects to `/`. All subsequent dashboard requests use the cookie — no token appears in URLs, browser history, or Referer headers.
+Navigate to `/login` to see the single configured provider. PCR uses authorization-code flow with state and PKCE, plus an OIDC nonce for Google and Authentik. The callback retrieves the current GitHub login, verified Google email, or Authentik-issued username plus the provider's stable subject, applies organization/subject policy, and sets an HttpOnly `SameSite=Lax` PCR session cookie.
 
-Each session cookie contains a unique nonce and creation timestamp, signed with HMAC-SHA256. The server validates both the signature and that the timestamp is within the 24-hour window.
+GitHub organization restriction verifies active membership with `read:org`. Google restriction requires a verified email and an exact signed `hd` Workspace-domain claim. `PCR_ALLOWED_ORGS` has OR semantics; stable subjects are explicit individual exceptions. Provider failures fail closed.
+
+Authentik uses OpenID Connect discovery at the configured per-provider issuer. PCR validates the ID-token signature, issuer, audience, expiry, and nonce. It uses signed `preferred_username`, falling back only to a verified email, and treats exact case-sensitive values in the signed `groups` claim as `PCR_ALLOWED_ORGS`. The Authentik provider must include scope mappings that emit these claims for the requested `openid email profile groups` scopes.
+
+With `PCR_HUMAN_AUTH_PROVIDER=beyond`, PCR performs no OAuth flow and requires `X-Beyond-Email`, with optional `X-Beyond-Name` and pipe-delimited `X-Beyond-Groups`, on every dashboard request. It lowercases the verified email and uses it as both the displayed user name and provider subject. The configured group check is exact and case-sensitive. This mode is safe only when PCR cannot be reached except through Beyond; otherwise callers can forge the headers. Kubernetes installers must apply the checked-in `k8s/networkpolicy-beyond.yaml` or an equivalent policy using their deployment's actual pod labels before exposing PCR. An email change intentionally creates a new PCR identity because the current Beyond header contract does not expose the OIDC `sub` claim.
+
+The signed session contains the provider subject and a mutable profile snapshot. Normal dashboard requests make no provider calls. OAuth provider profiles and policy refresh after the absolute `PCR_HUMAN_SESSION_DURATION` window. In Beyond mode, PCR binds every request to the current verified email and rechecks the current groups, so a changed edge identity cannot reuse a stale PCR session. Historical events retain their original name and subject snapshot.
 
 Set `PCR_SESSION_SECRET` to a stable string so sessions survive server restarts. If unset, a random secret is generated (sessions expire on restart). Set `PCR_COOKIE_SECURE=false` when running locally without TLS (default is `true`).
 
 ### CSRF protection
 
-Dashboard POST forms (e.g., star toggle) include a CSRF token derived from the session nonce. The server validates this token on every POST request to dashboard endpoints. API clients using Bearer tokens are not affected.
+Dashboard POST forms (e.g., star toggle) include a CSRF token derived from the session nonce. The server validates this token on every POST request to dashboard endpoints. API clients using explicit `Bearer` or `Token` credentials are not affected.
 
 ### Security headers
 
@@ -608,4 +634,4 @@ Tokens are configured through the `PCR_API_TOKENS` environment variable (comma-s
 - `/readyz` — PostgreSQL-backed readiness check
 - `/api/v1/health` — backwards-compatible readiness check
 - `/static/*` — CSS and static assets
-- `/login` — session login endpoint
+- `/login`, `/auth/start`, `/auth/callback` — human login endpoints

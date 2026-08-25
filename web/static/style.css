@@ -152,6 +152,47 @@ a:hover {
     box-shadow: 0 0 16px rgba(124, 255, 114, 0.65);
 }
 
+.navbar-session {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+}
+
+.navbar-user {
+    color: var(--console-muted);
+    font-family: "Share Tech Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.navbar-logout {
+    display: flex;
+}
+
+.navbar-logout button {
+    min-height: 34px;
+    padding: 0.4rem 0.72rem;
+    color: var(--signal-cyan);
+    border: 1px solid rgba(107, 231, 255, 0.32);
+    border-radius: 0;
+    background: rgba(107, 231, 255, 0.04);
+    clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 0 100%);
+    font-family: "Share Tech Mono", monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color var(--motion), border-color var(--motion), background var(--motion), box-shadow var(--motion);
+}
+
+.navbar-logout button:hover {
+    color: var(--phosphor-green);
+    border-color: var(--phosphor-green);
+    background: rgba(124, 255, 114, 0.09);
+    box-shadow: inset 0 0 13px rgba(124, 255, 114, 0.08), 0 0 12px rgba(124, 255, 114, 0.18);
+}
+
 .hero-metrics span,
 .filter-group label,
 .events-table th,
@@ -930,6 +971,19 @@ h3 {
 
     .navbar-title > span:last-child {
         display: none;
+    }
+
+    .navbar-session {
+        align-items: flex-end;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+
+    .navbar-user {
+        max-width: 64vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .container {

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -134,12 +133,6 @@ func (c *client) postJSON(ctx context.Context, path string, body, out any, opts 
 		}
 	}
 	return resp, nil
-}
-
-// postForm submits an x-www-form-urlencoded body.
-func (c *client) postForm(ctx context.Context, path string, form url.Values, opts ...reqOpt) (*response, error) {
-	opts = append(opts, withContentType("application/x-www-form-urlencoded"))
-	return c.do(ctx, http.MethodPost, path, strings.NewReader(form.Encode()), opts...)
 }
 
 // expectStatus returns an error if r.Status != want, formatting the body for diagnosis.

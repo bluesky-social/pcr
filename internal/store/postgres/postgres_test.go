@@ -134,6 +134,8 @@ func TestCreate(t *testing.T) {
 		ev := &model.ChangeEvent{
 			ID:              "evt-001",
 			UserName:        "alice",
+			UserProvider:    "github",
+			UserSubject:     "12345",
 			Timestamp:       ts,
 			EventType:       model.EventTypeDeployment,
 			Description:     "deploy v1.2.3",
@@ -156,6 +158,9 @@ func TestCreate(t *testing.T) {
 		}
 		if got.UserName != ev.UserName {
 			t.Errorf("UserName = %q, want %q", got.UserName, ev.UserName)
+		}
+		if got.UserProvider != ev.UserProvider || got.UserSubject != ev.UserSubject {
+			t.Errorf("identity = %q/%q, want %q/%q", got.UserProvider, got.UserSubject, ev.UserProvider, ev.UserSubject)
 		}
 		if !got.Timestamp.Equal(ev.Timestamp) {
 			t.Errorf("Timestamp = %v, want %v", got.Timestamp, ev.Timestamp)
@@ -187,6 +192,9 @@ func TestCreate(t *testing.T) {
 		stored, err := s.GetByID(ctx, ev.ID)
 		if err != nil {
 			t.Fatalf("GetByID: %v", err)
+		}
+		if stored.UserProvider != ev.UserProvider || stored.UserSubject != ev.UserSubject {
+			t.Errorf("stored identity = %q/%q, want %q/%q", stored.UserProvider, stored.UserSubject, ev.UserProvider, ev.UserSubject)
 		}
 		if len(stored.Links) != 2 || stored.Links[0].URL != ev.Links[0].URL || stored.Links[1].URL != ev.Links[1].URL {
 			t.Errorf("stored Links = %#v, want %#v", stored.Links, ev.Links)
@@ -366,7 +374,7 @@ func TestToggleStarIsAtomic(t *testing.T) {
 	t.Parallel()
 
 	s := newTestStore(t)
-	if _, err := s.ToggleStar(t.Context(), "missing", "alice"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.ToggleStar(t.Context(), "missing", model.UserIdentity{Name: "alice"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("ToggleStar(missing) error = %v, want %v", err, store.ErrNotFound)
 	}
 
@@ -382,7 +390,7 @@ func TestToggleStarIsAtomic(t *testing.T) {
 	for range toggles {
 		wg.Go(func() {
 			<-start
-			_, err := s.ToggleStar(t.Context(), parent.ID, "concurrent-user")
+			_, err := s.ToggleStar(t.Context(), parent.ID, model.UserIdentity{Name: "concurrent-user"})
 			errs <- err
 		})
 	}
@@ -403,7 +411,7 @@ func TestToggleStarIsAtomic(t *testing.T) {
 		t.Fatal("even number of concurrent toggles left event starred")
 	}
 
-	if _, err := s.ToggleStar(t.Context(), parent.ID, "concurrent-user"); err != nil {
+	if _, err := s.ToggleStar(t.Context(), parent.ID, model.UserIdentity{Name: "concurrent-user"}); err != nil {
 		t.Fatalf("final ToggleStar() error = %v", err)
 	}
 	annotations, err = s.GetAnnotations(t.Context(), parent.ID)
@@ -453,7 +461,7 @@ func TestToggleStarIsAtomicAcrossPools(t *testing.T) {
 		store := stores[i%len(stores)]
 		wg.Go(func() {
 			<-start
-			_, err := store.ToggleStar(ctx, parent.ID, "concurrent-user")
+			_, err := store.ToggleStar(ctx, parent.ID, model.UserIdentity{Name: "concurrent-user"})
 			errs <- err
 		})
 	}
@@ -484,14 +492,14 @@ func TestToggleAlertAppendsOppositeTransitions(t *testing.T) {
 		t.Fatalf("Create(parent) error = %v", err)
 	}
 
-	opened, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	opened, err := s.ToggleAlert(t.Context(), parent.ID, model.UserIdentity{Name: "on-call"})
 	if err != nil {
 		t.Fatalf("first ToggleAlert() error = %v", err)
 	}
 	if opened.EventType != model.EventTypeAlert || opened.ParentID != parent.ID {
 		t.Errorf("first transition = %+v", opened)
 	}
-	cleared, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	cleared, err := s.ToggleAlert(t.Context(), parent.ID, model.UserIdentity{Name: "on-call"})
 	if err != nil {
 		t.Fatalf("second ToggleAlert() error = %v", err)
 	}

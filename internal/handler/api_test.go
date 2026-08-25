@@ -40,16 +40,16 @@ func (m *mockStore) Create(ctx context.Context, event *model.ChangeEvent) (*mode
 	panic("unexpected call to Create")
 }
 
-func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+func (m *mockStore) ToggleStar(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
 	if m.toggleStarFn != nil {
-		return m.toggleStarFn(ctx, eventID, userName)
+		return m.toggleStarFn(ctx, eventID, user.Name)
 	}
 	panic("unexpected call to ToggleStar")
 }
 
-func (m *mockStore) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+func (m *mockStore) ToggleAlert(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
 	if m.toggleAlertFn != nil {
-		return m.toggleAlertFn(ctx, eventID, userName)
+		return m.toggleAlertFn(ctx, eventID, user.Name)
 	}
 	panic("unexpected call to ToggleAlert")
 }

@@ -91,12 +91,14 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 
 	_, err = tx.Exec(
 		ctx,
-		`INSERT INTO change_events (id, external_id, parent_id, user_name, timestamp, event_type, description, long_description, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		`INSERT INTO change_events (id, external_id, parent_id, user_name, user_provider, user_subject, timestamp, event_type, description, long_description, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		event.ID,
 		nullableString(event.ExternalID),
 		parentID,
 		event.UserName,
+		nullableString(event.UserProvider),
+		nullableString(event.UserSubject),
 		canonicalTime(event.Timestamp),
 		event.EventType,
 		event.Description,
@@ -134,6 +136,8 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 		ExternalID:      event.ExternalID,
 		ParentID:        event.ParentID,
 		UserName:        event.UserName,
+		UserProvider:    event.UserProvider,
+		UserSubject:     event.UserSubject,
 		Timestamp:       canonicalTime(event.Timestamp),
 		EventType:       event.EventType,
 		Description:     event.Description,
@@ -146,24 +150,28 @@ func (s *Store) Create(ctx context.Context, event *model.ChangeEvent) (result *m
 }
 
 // ToggleStar atomically appends the opposite star transition.
-func (s *Store) ToggleStar(ctx context.Context, eventID, userName string) (result *model.ChangeEvent, err error) {
+func (s *Store) ToggleStar(ctx context.Context, eventID string, user model.UserIdentity) (result *model.ChangeEvent, err error) {
 	start := time.Now()
 	defer func() { s.logOperation(ctx, "ToggleStar", start, err) }()
-	return s.toggleTransition(ctx, eventID, userName, model.EventTypeStar, model.EventTypeUnstar, "starred", "unstarred")
+	return s.toggleTransition(ctx, eventID, user, model.EventTypeStar, model.EventTypeUnstar, "starred", "unstarred")
 }
 
 // ToggleAlert atomically appends the opposite alert transition.
-func (s *Store) ToggleAlert(ctx context.Context, eventID, userName string) (result *model.ChangeEvent, err error) {
+func (s *Store) ToggleAlert(ctx context.Context, eventID string, user model.UserIdentity) (result *model.ChangeEvent, err error) {
 	start := time.Now()
 	defer func() { s.logOperation(ctx, "ToggleAlert", start, err) }()
-	return s.toggleTransition(ctx, eventID, userName, model.EventTypeAlert, model.EventTypeClearAlert, "alert opened", "alert cleared")
+	return s.toggleTransition(ctx, eventID, user, model.EventTypeAlert, model.EventTypeClearAlert, "alert opened", "alert cleared")
 }
 
 // toggleTransition locks the parent row so concurrent replicas cannot both
 // observe and append the same transition.
+//
+//nolint:funlen // Keeping the lock, state read, insert, and commit together makes the transaction boundary auditable.
 func (s *Store) toggleTransition(
 	ctx context.Context,
-	eventID, userName, activeType, inactiveType, activeDescription, inactiveDescription string,
+	eventID string,
+	user model.UserIdentity,
+	activeType, inactiveType, activeDescription, inactiveDescription string,
 ) (result *model.ChangeEvent, err error) {
 
 	tx, err := s.pool.Begin(ctx)
@@ -207,24 +215,28 @@ func (s *Store) toggleTransition(
 	}
 	now := canonicalTime(time.Now())
 	result = &model.ChangeEvent{
-		ID:          id.String(),
-		ParentID:    eventID,
-		UserName:    userName,
-		Timestamp:   now,
-		EventType:   eventType,
-		Description: description,
-		Tags:        make(map[string]string),
-		CreatedAt:   now,
+		ID:           id.String(),
+		ParentID:     eventID,
+		UserName:     user.Name,
+		UserProvider: user.Provider,
+		UserSubject:  user.Subject,
+		Timestamp:    now,
+		EventType:    eventType,
+		Description:  description,
+		Tags:         make(map[string]string),
+		CreatedAt:    now,
 	}
 
 	_, err = tx.Exec(
 		ctx,
 		`INSERT INTO change_events
-		 (id, external_id, parent_id, user_name, timestamp, event_type, description, long_description, created_at)
-		 VALUES ($1, NULL, $2, $3, $4, $5, $6, '', $7)`,
+		 (id, external_id, parent_id, user_name, user_provider, user_subject, timestamp, event_type, description, long_description, created_at)
+		 VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, '', $9)`,
 		result.ID,
 		result.ParentID,
 		result.UserName,
+		nullableString(result.UserProvider),
+		nullableString(result.UserSubject),
 		result.Timestamp,
 		result.EventType,
 		result.Description,
@@ -248,7 +260,7 @@ func (s *Store) GetByID(ctx context.Context, id string) (result *model.ChangeEve
 
 	row := s.pool.QueryRow(
 		ctx,
-		`SELECT id, external_id, parent_id, user_name, timestamp, event_type, description, long_description, created_at
+		`SELECT id, external_id, parent_id, user_name, user_provider, user_subject, timestamp, event_type, description, long_description, created_at
 		 FROM change_events WHERE id = $1`,
 		id,
 	)
@@ -296,7 +308,7 @@ func (s *Store) List(ctx context.Context, params model.ListParams) (result *mode
 	// Fetch the page. Same constraint as countQuery above: user input is
 	// bound via parameters, only the WHERE clause shape is interpolated.
 	selectQuery := fmt.Sprintf(
-		`SELECT id, external_id, parent_id, user_name, timestamp, event_type, description, long_description, created_at
+		`SELECT id, external_id, parent_id, user_name, user_provider, user_subject, timestamp, event_type, description, long_description, created_at
 		 FROM change_events%s
 		 ORDER BY timestamp DESC, id ASC
 		 LIMIT $%d OFFSET $%d`,
@@ -438,7 +450,8 @@ func (s *Store) ListCurrent(ctx context.Context, params model.CurrentParams) (re
 	}
 
 	selectQuery := fmt.Sprintf(
-		`%sSELECT event.id, event.external_id, event.parent_id, event.user_name, event.timestamp,
+		`%sSELECT event.id, event.external_id, event.parent_id, event.user_name,
+		       event.user_provider, event.user_subject, event.timestamp,
 		       event.event_type, event.description, event.long_description, event.created_at
 		%s%s
 		ORDER BY event.timestamp DESC, event.id ASC
@@ -654,7 +667,7 @@ func (s *Store) GetByExternalID(ctx context.Context, externalID string) (result 
 
 	row := s.pool.QueryRow(
 		ctx,
-		`SELECT id, external_id, parent_id, user_name, timestamp, event_type, description, long_description, created_at
+		`SELECT id, external_id, parent_id, user_name, user_provider, user_subject, timestamp, event_type, description, long_description, created_at
 		 FROM change_events WHERE external_id = $1`,
 		externalID,
 	)
@@ -688,17 +701,21 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-// scanEventFields scans 9 columns from a change_events row into a ChangeEvent.
+// scanEventFields scans the selected change_events columns into a ChangeEvent.
 func scanEventFields(sc scanner) (*model.ChangeEvent, error) {
 	var ev model.ChangeEvent
 	var externalID *string
 	var parentID *string
+	var userProvider *string
+	var userSubject *string
 
 	err := sc.Scan(
 		&ev.ID,
 		&externalID,
 		&parentID,
 		&ev.UserName,
+		&userProvider,
+		&userSubject,
 		&ev.Timestamp,
 		&ev.EventType,
 		&ev.Description,
@@ -717,6 +734,12 @@ func scanEventFields(sc scanner) (*model.ChangeEvent, error) {
 	// Convert nullable parent_id to string (empty when NULL).
 	if parentID != nil {
 		ev.ParentID = *parentID
+	}
+	if userProvider != nil {
+		ev.UserProvider = *userProvider
+	}
+	if userSubject != nil {
+		ev.UserSubject = *userSubject
 	}
 
 	ev.Timestamp = canonicalTime(ev.Timestamp)

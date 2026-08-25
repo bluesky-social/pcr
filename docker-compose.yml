@@ -29,6 +29,14 @@ services:
       PCR_AUTO_MIGRATE: "true"
       PCR_REQUIRE_AUTH_READS: "true"
       PCR_COOKIE_SECURE: "false"
+      PCR_HUMAN_AUTH_PROVIDER: "${PCR_HUMAN_AUTH_PROVIDER:-github}"
+      PCR_PUBLIC_URL: "${PCR_PUBLIC_URL:-http://localhost:8080}"
+      PCR_OAUTH_CLIENT_ID: "${PCR_OAUTH_CLIENT_ID:-replace-me}"
+      PCR_OAUTH_CLIENT_SECRET: "${PCR_OAUTH_CLIENT_SECRET:-replace-me}"
+      PCR_OIDC_ISSUER_URL: "${PCR_OIDC_ISSUER_URL:-}"
+      PCR_ALLOWED_ORGS: "${PCR_ALLOWED_ORGS:-}"
+      PCR_HUMAN_AUTH_ALLOW_ANY: "${PCR_HUMAN_AUTH_ALLOW_ANY:-true}"
+      PCR_HUMAN_SESSION_DURATION: "${PCR_HUMAN_SESSION_DURATION:-12h}"
     restart: unless-stopped
 
 volumes:

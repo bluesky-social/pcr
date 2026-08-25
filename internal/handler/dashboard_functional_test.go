@@ -21,6 +21,7 @@ import (
 	"github.com/sarah/go-prod-change-registry/internal/config"
 	"github.com/sarah/go-prod-change-registry/internal/fixture"
 	"github.com/sarah/go-prod-change-registry/internal/handler"
+	"github.com/sarah/go-prod-change-registry/internal/humanauth"
 	"github.com/sarah/go-prod-change-registry/internal/middleware"
 	"github.com/sarah/go-prod-change-registry/internal/model"
 	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
@@ -261,11 +262,26 @@ func seededDashboardRouter(t *testing.T) http.Handler {
 
 	apiHandler := handler.NewAPIHandler(svc, pool)
 	dashboardHandler := handler.NewDashboardHandler(svc, 0, []byte("functional-test-session-secret-32b"))
-	loginHandler := handler.NewLoginHandler([]string{"demo-token"}, middleware.SessionOptions{Secret: []byte("functional-test-session-secret-32b")})
-	return router.New(apiHandler, dashboardHandler, loginHandler, &config.Config{
-		APITokens:        []string{"demo-token"},
-		RequireAuthReads: false,
-		SessionSecret:    []byte("functional-test-session-secret-32b"),
+	authenticator := humanauth.NewGitHub(humanauth.ProviderOptions{ClientID: "test", AllowAny: true})
+	humanAuthHandler := handler.NewHumanAuthHandler(authenticator, handler.HumanAuthOptions{
+		SessionSecret: []byte("functional-test-session-secret-32b"), SessionDuration: time.Hour,
+	})
+	mux := router.New(apiHandler, dashboardHandler, humanAuthHandler, &config.Config{
+		APITokens:         []string{"demo-token"},
+		RequireAuthReads:  false,
+		SessionSecret:     []byte("functional-test-session-secret-32b"),
+		HumanAuthProvider: "github",
+	})
+	cookieRecorder := httptest.NewRecorder()
+	if err := middleware.SetHumanSessionCookie(cookieRecorder, middleware.HumanSessionOptions{
+		Secret: []byte("functional-test-session-secret-32b"), Duration: time.Hour,
+	}, humanauth.Principal{Provider: "github", Subject: "12345", UserName: "alice"}); err != nil {
+		t.Fatalf("SetHumanSessionCookie(): %v", err)
+	}
+	cookie := cookieRecorder.Result().Cookies()[0]
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.AddCookie(cookie)
+		mux.ServeHTTP(w, r)
 	})
 }
 

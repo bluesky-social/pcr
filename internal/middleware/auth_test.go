@@ -35,6 +35,14 @@ func TestAuth(t *testing.T) {
 			expectedStatus:  http.StatusOK,
 		},
 		{
+			name:            "valid Token credential allows Beyond passthrough request through",
+			method:          http.MethodPost,
+			path:            "/api/v1/changes",
+			authHeader:      "Token " + validToken,
+			requireForReads: true,
+			expectedStatus:  http.StatusOK,
+		},
+		{
 			name:            "missing Authorization header returns 401",
 			method:          http.MethodPost,
 			path:            "/api/v1/changes",

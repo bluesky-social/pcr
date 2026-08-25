@@ -72,6 +72,13 @@ docker-run: docker-build
 		-e PCR_API_TOKENS=$${PCR_API_TOKENS:-changeme} \
 		-e PCR_SESSION_SECRET=$${PCR_SESSION_SECRET:-dev-default-please-override-in-production} \
 		-e PCR_DATABASE_URL \
+		-e PCR_COOKIE_SECURE=false \
+		-e PCR_HUMAN_AUTH_PROVIDER=$${PCR_HUMAN_AUTH_PROVIDER:-github} \
+		-e PCR_PUBLIC_URL=$${PCR_PUBLIC_URL:-http://localhost:8080} \
+		-e PCR_OAUTH_CLIENT_ID=$${PCR_OAUTH_CLIENT_ID:-replace-me} \
+		-e PCR_OAUTH_CLIENT_SECRET=$${PCR_OAUTH_CLIENT_SECRET:-replace-me} \
+		-e PCR_OIDC_ISSUER_URL=$${PCR_OIDC_ISSUER_URL:-} \
+		-e PCR_HUMAN_AUTH_ALLOW_ANY=$${PCR_HUMAN_AUTH_ALLOW_ANY:-true} \
 		pcr-server
 
 docker-compose-up:

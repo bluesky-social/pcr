@@ -11,3 +11,12 @@ data:
   PCR_REQUIRE_AUTH_READS: "true"
   PCR_DASHBOARD_REFRESH_SEC: "60"
   PCR_COOKIE_SECURE: "true"
+  # PCR_ALLOWED_ORGS contains GitHub organizations, Google Workspace domains,
+  # or exact Authentik/Beyond group names, depending on the selected provider.
+  PCR_HUMAN_AUTH_PROVIDER: "github"
+  PCR_PUBLIC_URL: "https://changes.example.com"
+  # Required only for Authentik, for example https://auth.example.com/application/o/pcr/
+  PCR_OIDC_ISSUER_URL: ""
+  PCR_ALLOWED_ORGS: "example-inc"
+  PCR_HUMAN_AUTH_ALLOW_ANY: "false"
+  PCR_HUMAN_SESSION_DURATION: "12h"

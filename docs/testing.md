@@ -56,8 +56,104 @@ make build
 export PCR_API_TOKENS=test-token
 export PCR_DATABASE_URL='postgres://pcr@127.0.0.1/pcr?sslmode=disable'
 export PCR_COOKIE_SECURE=false
+export PCR_HUMAN_AUTH_PROVIDER=github
+export PCR_PUBLIC_URL=http://localhost:8080
+export PCR_OAUTH_CLIENT_ID=your-local-github-client-id
+export PCR_OAUTH_CLIENT_SECRET=your-local-github-client-secret
+export PCR_HUMAN_AUTH_ALLOW_ANY=true
 ./bin/pcr-server
 ```
+
+For an Authentik acceptance run, replace the provider with `authentik`, set `PCR_OIDC_ISSUER_URL` to the per-provider issuer ending in `/application/o/<slug>/`, and register `http://localhost:8080/auth/callback` as an exact redirect URI. In unrestricted mode, verify the resolved signed username first. Then set `PCR_ALLOWED_ORGS` to an exact Authentik group and disable unrestricted mode to verify the signed `groups` claim.
+
+## Beyond acceptance before deployment
+
+Use four stages so header handling, browser behavior, edge routing, and
+Kubernetes isolation fail independently.
+
+### 1. Automated contract checks
+
+Run the focused tests first, then the complete suite:
+
+```bash
+go test ./internal/humanauth ./internal/middleware ./internal/handler ./internal/config ./internal/router
+go test ./...
+```
+
+The focused checks cover exact group matching, missing/malformed email,
+case-normalized email identity, local-session binding to the current Beyond
+identity, profile refresh, `Token` API credentials, and the Beyond login
+bootstrap. These commands are verification instructions; they are not run as
+part of documentation generation.
+
+### 2. Local PCR header harness
+
+Run PCR on loopback with a generic test group and no OAuth credentials:
+
+```bash
+export PCR_HUMAN_AUTH_PROVIDER=beyond
+export PCR_PUBLIC_URL=http://127.0.0.1:18082
+export PCR_COOKIE_SECURE=false
+export PCR_ALLOWED_ORGS=engineering
+export PCR_HUMAN_AUTH_ALLOW_ANY=false
+```
+
+Use `curl` with a cookie jar to call `/auth/start` with
+`X-Beyond-Email`, `X-Beyond-Name`, and `X-Beyond-Groups`, then request `/`
+with the same headers and cookie. Confirm that a missing email, a wrong-case
+group, or a different email with the old PCR cookie is rejected. This stage
+checks PCR behavior only; loopback headers are deliberately synthetic and do
+not establish the production trust boundary.
+
+Exercise the proxy-facing API scheme directly as well:
+
+```bash
+curl -sS -H "Authorization: Token $PCR_TOKEN" http://127.0.0.1:18082/api/v1/events
+```
+
+### 3. Local Beyond browser acceptance
+
+Use Beyond's existing development Authentik stack and test account. Create a
+temporary Beyond configuration outside either repository with a PCR
+application entry, an exact generic `allowed_groups` value, and
+`passthrough_auth_schemes: [Token]`. Route it to the locally running seeded PCR
+instance. Do not add company group names to a fixture.
+
+Verify through the Beyond hostname:
+
+1. An unauthenticated browser is sent through Beyond's Authentik login.
+2. PCR shows `Continue with Company SSO`, establishes its local session, and
+   displays the verified email/name.
+3. The user can open an existing incident and add a link; the activity entry
+   stores `user_provider=beyond` and the normalized verified email.
+4. PCR logout clears the PCR session. The Beyond/Authentik SSO session remains,
+   so continuing again may not prompt for a password.
+5. A sessionless API call using `Authorization: Token` reaches PCR and works;
+   the same request with a bad token is rejected by PCR.
+6. A caller-supplied `X-Beyond-Email` on the Token passthrough path is stripped
+   by Beyond and cannot create dashboard authority.
+
+### 4. Disposable Kubernetes pre-production
+
+Before the production hostname is enabled, deploy the same image and manifests
+to a disposable namespace behind Beyond with non-production data. Apply the
+intended NetworkPolicy and verify both sides of the boundary:
+
+- Beyond pods can reach PCR's application port.
+- A pod in an unrelated namespace cannot connect directly to that port.
+- Health probes remain successful under the selected network plugin.
+- Browser login, name display, link creation, logout, and structured auth/audit
+  logs match the local acceptance run.
+- Removing the test user from the allowed group causes Beyond or PCR to deny
+  subsequent requests; restoring it restores access.
+- Reusing a PCR cookie while Beyond asserts a different email is rejected.
+- Two PCR replicas accept the same signed session without sticky routing.
+- `Authorization: Token` works through Beyond while `Bearer` is not relied on
+  for opaque PCR tokens at the edge.
+
+Promote only after the negative network test and the mismatched-identity test
+both fail closed. Record the image digest, Beyond configuration revision,
+NetworkPolicy, and observed audit-log entries used for acceptance.
 
 In another shell:
 
@@ -171,7 +267,7 @@ Use a new logical identifier for a restarted operation. A retry of the same phas
 
 ## Dashboard checks
 
-Open `http://localhost:8080/login`, enter `test-token`, and verify:
+Register `http://localhost:8080/auth/callback`, open `http://localhost:8080/login`, sign in with the configured provider, and verify:
 
 1. The default view contains top-level events timestamped within the last 24 hours.
 2. Current shows the selected team's active work, unattributed active work, and active site-wide work regardless of age.
@@ -191,6 +287,6 @@ Open `http://localhost:8080/login`, enter `test-token`, and verify:
 
 With the default `PCR_REQUIRE_AUTH_READS=true`:
 
-- `/livez`, `/readyz`, `/api/v1/health`, `/login`, and `/static/*` are public.
-- API reads and writes require a Bearer token or the backwards-compatible `token` query parameter. Dashboard routes also accept a valid session cookie.
-- Setting `PCR_REQUIRE_AUTH_READS=false` makes `GET` and `HEAD` requests public; writes still require authentication.
+- `/livez`, `/readyz`, `/api/v1/health`, `/login`, `/auth/start`, `/auth/callback`, and `/static/*` are public.
+- API reads and writes require a `Bearer` or `Token` credential, or the backwards-compatible API `token` query parameter. Dashboard routes require a provider-established human session.
+- Setting `PCR_REQUIRE_AUTH_READS=false` makes API `GET` and `HEAD` requests public; dashboard routes remain human-authenticated and API writes still require a token.

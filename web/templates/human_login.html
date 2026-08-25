@@ -1,0 +1,11 @@
+{{define "content"}}
+<div class="login-page instrument-housing">
+    <h2>Login</h2>
+    <form method="GET" action="/auth/start" class="login-form">
+        <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+        <div class="filter-actions">
+            <button type="submit">{{.ButtonLabel}}</button>
+        </div>
+    </form>
+</div>
+{{end}}

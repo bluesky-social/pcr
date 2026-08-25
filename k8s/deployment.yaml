@@ -56,22 +56,29 @@ spec:
                 secretKeyRef:
                   name: pcr-secrets
                   key: database-url
+            - name: PCR_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: pcr-secrets
+                  key: oauth-client-id
+            - name: PCR_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pcr-secrets
+                  key: oauth-client-secret
           startupProbe:
-            httpGet:
-              path: /readyz
-              port: http
+            exec:
+              command: [wget, -qO-, http://127.0.0.1:8080/readyz]
             periodSeconds: 10
             failureThreshold: 30
           livenessProbe:
-            httpGet:
-              path: /livez
-              port: http
+            exec:
+              command: [wget, -qO-, http://127.0.0.1:8080/livez]
             initialDelaySeconds: 5
             periodSeconds: 30
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: http
+            exec:
+              command: [wget, -qO-, http://127.0.0.1:8080/readyz]
             initialDelaySeconds: 3
             periodSeconds: 10
           resources:

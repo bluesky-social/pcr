@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sarah/go-prod-change-registry/internal/config"
 	"github.com/sarah/go-prod-change-registry/internal/handler"
+	"github.com/sarah/go-prod-change-registry/internal/humanauth"
 	"github.com/sarah/go-prod-change-registry/internal/middleware"
 	"github.com/sarah/go-prod-change-registry/internal/model"
 	"github.com/sarah/go-prod-change-registry/internal/router"
@@ -39,16 +42,16 @@ func (m *mockStore) Create(ctx context.Context, event *model.ChangeEvent) (*mode
 	panic("unexpected call to Create")
 }
 
-func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+func (m *mockStore) ToggleStar(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
 	if m.toggleStarFn != nil {
-		return m.toggleStarFn(ctx, eventID, userName)
+		return m.toggleStarFn(ctx, eventID, user.Name)
 	}
 	panic("unexpected call to ToggleStar")
 }
 
-func (m *mockStore) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+func (m *mockStore) ToggleAlert(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
 	if m.toggleAlertFn != nil {
-		return m.toggleAlertFn(ctx, eventID, userName)
+		return m.toggleAlertFn(ctx, eventID, user.Name)
 	}
 	panic("unexpected call to ToggleAlert")
 }
@@ -98,6 +101,15 @@ const testToken = "test-secret-token"
 
 // newTestRouter creates a full router with auth middleware and mock store.
 func newTestRouter(t *testing.T, requireAuthReads bool) (http.Handler, *mockStore) {
+	t.Helper()
+	authenticator := humanauth.NewGitHub(humanauth.ProviderOptions{ClientID: "test", AllowAny: true})
+	humanAuthH := handler.NewHumanAuthHandler(authenticator, handler.HumanAuthOptions{
+		SessionSecret: []byte("test-session-secret"), SessionDuration: time.Hour,
+	})
+	return newTestRouterWithHumanAuth(t, requireAuthReads, humanAuthH, "github")
+}
+
+func newTestRouterWithHumanAuth(t *testing.T, requireAuthReads bool, humanAuthH *handler.HumanAuthHandler, provider string) (http.Handler, *mockStore) {
 	t.Helper()
 
 	now := time.Now().UTC()
@@ -153,16 +165,54 @@ func newTestRouter(t *testing.T, requireAuthReads bool) (http.Handler, *mockStor
 	svc := service.NewChangeService(ms)
 	apiH := handler.NewAPIHandler(svc, &mockPinger{})
 	dashH := handler.NewDashboardHandler(svc, 0, []byte("test-session-secret"))
-	loginH := handler.NewLoginHandler([]string{testToken}, middleware.SessionOptions{Secret: []byte("test-session-secret")})
 
 	cfg := &config.Config{
-		APITokens:        []string{testToken},
-		RequireAuthReads: requireAuthReads,
-		SessionSecret:    []byte("test-session-secret"),
+		APITokens:         []string{testToken},
+		RequireAuthReads:  requireAuthReads,
+		SessionSecret:     []byte("test-session-secret"),
+		HumanAuthProvider: provider,
 	}
 
-	r := router.New(apiH, dashH, loginH, cfg)
+	r := router.New(apiH, dashH, humanAuthH, cfg)
 	return r, ms
+}
+
+func TestBeyondLogoutDoesNotRequireCurrentGroupMembership(t *testing.T) {
+	t.Parallel()
+
+	beyond := humanauth.NewBeyond(humanauth.ProviderOptions{AllowedOrgs: []string{"engineering"}})
+	humanAuthH := handler.NewBeyondHumanAuthHandler(beyond, handler.HumanAuthOptions{
+		SessionSecret: []byte("test-session-secret"), SessionDuration: time.Hour,
+	})
+	r, _ := newTestRouterWithHumanAuth(t, true, humanAuthH, "beyond")
+
+	cookieRecorder := httptest.NewRecorder()
+	if err := middleware.SetHumanSessionCookie(cookieRecorder, middleware.HumanSessionOptions{
+		Secret: []byte("test-session-secret"), Duration: time.Hour,
+	}, humanauth.Principal{Provider: "beyond", Subject: "alice@example.com", UserName: "alice@example.com"}); err != nil {
+		t.Fatalf("SetHumanSessionCookie(): %v", err)
+	}
+	cookie := cookieRecorder.Result().Cookies()[0]
+	sessionRequest := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	sessionRequest.AddCookie(cookie)
+	session, err := middleware.ReadHumanSession(sessionRequest, []byte("test-session-secret"), "beyond")
+	if err != nil {
+		t.Fatalf("ReadHumanSession(): %v", err)
+	}
+
+	form := url.Values{"csrf_token": {middleware.GenerateCSRFToken([]byte("test-session-secret"), session.Nonce)}}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /logout status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	if cookies := rec.Result().Cookies(); len(cookies) != 1 || cookies[0].MaxAge >= 0 {
+		t.Fatalf("POST /logout cookies = %#v, want one deletion cookie", cookies)
+	}
 }
 
 func TestAuthEnforcement(t *testing.T) {
@@ -178,47 +228,56 @@ func TestAuthEnforcement(t *testing.T) {
 			method string
 			path   string
 			body   string
+			status int
 		}{
 			{
 				name:   "POST /api/v1/events without auth",
 				method: http.MethodPost,
 				path:   "/api/v1/events",
 				body:   `{"user_name":"sarah","event_type":"deployment","description":"test"}`,
+				status: http.StatusUnauthorized,
 			},
 			{
 				name:   "GET /api/v1/events without auth",
 				method: http.MethodGet,
 				path:   "/api/v1/events",
+				status: http.StatusUnauthorized,
 			},
 			{
 				name:   "GET /api/v1/current without auth",
 				method: http.MethodGet,
 				path:   "/api/v1/current",
+				status: http.StatusUnauthorized,
 			},
 			{
 				name:   "GET /api/v1/events/{id} without auth",
 				method: http.MethodGet,
 				path:   "/api/v1/events/some-id",
+				status: http.StatusUnauthorized,
 			},
 			{
 				name:   "GET /api/v1/events/{id}/annotations without auth",
 				method: http.MethodGet,
 				path:   "/api/v1/events/some-id/annotations",
+				status: http.StatusUnauthorized,
 			},
 			{
 				name:   "POST /api/v1/events/{id}/star without auth",
 				method: http.MethodPost,
 				path:   "/api/v1/events/some-id/star",
+				status: http.StatusUnauthorized,
 			},
 			{
 				name:   "GET / (dashboard) without auth",
 				method: http.MethodGet,
 				path:   "/",
+				status: http.StatusFound,
 			},
 			{
 				name:   "GET /events/{id} (detail) without auth",
 				method: http.MethodGet,
 				path:   "/events/some-id",
+				status: http.StatusFound,
 			},
 		}
 
@@ -237,8 +296,8 @@ func TestAuthEnforcement(t *testing.T) {
 				rec := httptest.NewRecorder()
 				r.ServeHTTP(rec, req)
 
-				if rec.Code != http.StatusUnauthorized {
-					t.Fatalf("expected 401 for %s %s, got %d", tc.method, tc.path, rec.Code)
+				if rec.Code != tc.status {
+					t.Fatalf("%s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.status)
 				}
 			})
 		}
@@ -316,7 +375,11 @@ func TestAuthEnforcement(t *testing.T) {
 
 		r, _ := newTestRouter(t, true)
 		cookieRecorder := httptest.NewRecorder()
-		middleware.SetSessionCookie(cookieRecorder, middleware.SessionOptions{Secret: []byte("test-session-secret")})
+		if err := middleware.SetHumanSessionCookie(cookieRecorder, middleware.HumanSessionOptions{
+			Secret: []byte("test-session-secret"), Duration: time.Hour,
+		}, humanauth.Principal{Provider: "github", Subject: "12345", UserName: "alice"}); err != nil {
+			t.Fatalf("SetHumanSessionCookie(): %v", err)
+		}
 		cookies := cookieRecorder.Result().Cookies()
 		if len(cookies) != 1 {
 			t.Fatalf("session cookie count = %d, want 1", len(cookies))
@@ -345,7 +408,7 @@ func TestAuthEnforcement(t *testing.T) {
 		}
 	})
 
-	t.Run("query param token allows viewing dashboard", func(t *testing.T) {
+	t.Run("query param token does not authenticate dashboard", func(t *testing.T) {
 		t.Parallel()
 
 		r, _ := newTestRouter(t, true)
@@ -353,8 +416,8 @@ func TestAuthEnforcement(t *testing.T) {
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 for dashboard with token param, got %d", rec.Code)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("dashboard status = %d, want login redirect", rec.Code)
 		}
 	})
 

@@ -9,12 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sarah/go-prod-change-registry/internal/config"
 	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
+	"github.com/sarah/go-prod-change-registry/internal/humanauth"
 	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
 	"github.com/sarah/go-prod-change-registry/internal/router"
 	"github.com/sarah/go-prod-change-registry/internal/service"
@@ -65,12 +66,34 @@ func run(cfg *config.Config) error {
 	svc := service.NewChangeService(store)
 	apiHandler := handler.NewAPIHandler(svc, pool)
 	dashHandler := handler.NewDashboardHandler(svc, cfg.DashboardRefreshSec, cfg.SessionSecret)
-	loginHandler := handler.NewLoginHandler(cfg.APITokens, middleware.SessionOptions{
-		Secret: cfg.SessionSecret,
-		Secure: cfg.CookieSecure,
-	})
+	providerOpts := humanauth.ProviderOptions{
+		ClientID:        cfg.OAuthClientID,
+		ClientSecret:    cfg.OAuthClientSecret,
+		RedirectURL:     strings.TrimRight(cfg.PublicURL, "/") + "/auth/callback",
+		IssuerURL:       cfg.OIDCIssuerURL,
+		AllowedOrgs:     cfg.AllowedOrgs,
+		AllowedSubjects: cfg.HumanAuthAllowedSubjects,
+		AllowAny:        cfg.HumanAuthAllowAny,
+	}
+	humanAuthOpts := handler.HumanAuthOptions{
+		SessionSecret:   cfg.SessionSecret,
+		CookieSecure:    cfg.CookieSecure,
+		SessionDuration: cfg.HumanSessionDuration,
+	}
+	var humanAuthHandler *handler.HumanAuthHandler
+	if cfg.HumanAuthProvider == "beyond" {
+		humanAuthHandler = handler.NewBeyondHumanAuthHandler(humanauth.NewBeyond(providerOpts), humanAuthOpts)
+	} else {
+		authCtx, cancelAuth := context.WithTimeout(context.Background(), cfg.DBConnectTimeout)
+		authenticator, err := humanauth.New(authCtx, cfg.HumanAuthProvider, providerOpts)
+		cancelAuth()
+		if err != nil {
+			return fmt.Errorf("configure human authentication: %w", err)
+		}
+		humanAuthHandler = handler.NewHumanAuthHandler(authenticator, humanAuthOpts)
+	}
 
-	r := router.New(apiHandler, dashHandler, loginHandler, cfg)
+	r := router.New(apiHandler, dashHandler, humanAuthHandler, cfg)
 	srv := &http.Server{
 		Addr:         cfg.Addr,
 		Handler:      r,
