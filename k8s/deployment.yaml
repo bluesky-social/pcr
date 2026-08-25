@@ -6,9 +6,9 @@ metadata:
   labels:
     app: pcr-server
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
   selector:
     matchLabels:
       app: pcr-server
@@ -38,9 +38,17 @@ spec:
                 secretKeyRef:
                   name: pcr-secrets
                   key: session-secret
-          volumeMounts:
-            - name: data
-              mountPath: /data
+            - name: PCR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pcr-secrets
+                  key: database-url
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /api/v1/health
@@ -60,7 +68,3 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "500m"
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: pcr-data

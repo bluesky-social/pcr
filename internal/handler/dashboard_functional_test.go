@@ -3,12 +3,11 @@
 package handler_test
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
-	"fmt"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,17 +15,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sarah/go-prod-change-registry/internal/config"
 	"github.com/sarah/go-prod-change-registry/internal/fixture"
 	"github.com/sarah/go-prod-change-registry/internal/handler"
 	"github.com/sarah/go-prod-change-registry/internal/middleware"
 	"github.com/sarah/go-prod-change-registry/internal/model"
+	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
 	"github.com/sarah/go-prod-change-registry/internal/router"
 	"github.com/sarah/go-prod-change-registry/internal/service"
-	"github.com/sarah/go-prod-change-registry/internal/store/sqlite"
-	"github.com/sarah/go-prod-change-registry/migrations"
-
-	_ "modernc.org/sqlite"
+	postgresstore "github.com/sarah/go-prod-change-registry/internal/store/postgres"
 )
 
 func TestSeededDashboardViews(t *testing.T) {
@@ -226,28 +226,20 @@ func TestSeededDashboardViews(t *testing.T) {
 func seededDashboardRouter(t *testing.T) http.Handler {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "dashboard.db")
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(on)&_txlock=immediate", dbPath)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatalf("open database: %v", err)
+	databaseURL := functionalDatabaseURL(t)
+	if err := postgresdb.Migrate(databaseURL, time.Second); err != nil {
+		t.Fatalf("migrate functional test database: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("close database: %v", err)
-		}
+	pool, err := postgresdb.Open(t.Context(), databaseURL, postgresdb.PoolOptions{
+		MaxConnections: 5,
+		ConnectTimeout: time.Second,
 	})
-	for _, name := range []string{"001_create_change_events.up.sql"} {
-		migration, err := fs.ReadFile(migrations.FS, name)
-		if err != nil {
-			t.Fatalf("read migration %s: %v", name, err)
-		}
-		if _, err := db.ExecContext(t.Context(), string(migration)); err != nil {
-			t.Fatalf("apply migration %s: %v", name, err)
-		}
+	if err != nil {
+		t.Fatalf("open functional test database: %v", err)
 	}
+	t.Cleanup(pool.Close)
 
-	store := sqlite.New(db, time.Second)
+	store := postgresstore.New(pool, time.Second)
 	svc := service.NewChangeService(store)
 	_, sourceFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -267,7 +259,7 @@ func seededDashboardRouter(t *testing.T) http.Handler {
 		t.Fatalf("apply fixture: %v", err)
 	}
 
-	apiHandler := handler.NewAPIHandler(svc, db)
+	apiHandler := handler.NewAPIHandler(svc, pool)
 	dashboardHandler := handler.NewDashboardHandler(svc, 0, []byte("functional-test-session-secret-32b"))
 	loginHandler := handler.NewLoginHandler([]string{"demo-token"}, middleware.SessionOptions{Secret: []byte("functional-test-session-secret-32b")})
 	return router.New(apiHandler, dashboardHandler, loginHandler, &config.Config{
@@ -275,6 +267,41 @@ func seededDashboardRouter(t *testing.T) http.Handler {
 		RequireAuthReads: false,
 		SessionSecret:    []byte("functional-test-session-secret-32b"),
 	})
+}
+
+func functionalDatabaseURL(t *testing.T) string {
+	t.Helper()
+	databaseURL := os.Getenv("PCR_TEST_POSTGRES_URL")
+	if databaseURL == "" {
+		t.Skip("PCR_TEST_POSTGRES_URL is not set")
+	}
+
+	admin, err := pgxpool.New(t.Context(), databaseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL test admin pool: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	schema := "pcr_dashboard_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := admin.Exec(t.Context(), "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create dashboard test schema %q: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop dashboard test schema %q: %v", schema, err)
+		}
+	})
+
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatalf("parse PCR_TEST_POSTGRES_URL: %v", err)
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func renderDashboard(t *testing.T, handler http.Handler, path string) string {

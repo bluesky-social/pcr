@@ -1,20 +1,35 @@
 services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: pcr
+      POSTGRES_USER: pcr
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-pcr-local-password}"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pcr -d pcr"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
   pcr-server:
     build: .
     ports:
       - "8080:8080"
-    volumes:
-      - pcr-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       PCR_API_TOKENS: "${PCR_API_TOKENS:-changeme}"
       # Dev placeholder; >= 32 bytes so config.loadSessionSecret accepts it.
       # MUST be overridden in any non-local environment.
       PCR_SESSION_SECRET: "${PCR_SESSION_SECRET:-dev-default-please-override-in-production}"
-      PCR_DATABASE_PATH: /data/registry.db
+      PCR_DATABASE_URL: "postgres://pcr:${POSTGRES_PASSWORD:-pcr-local-password}@postgres:5432/pcr?sslmode=disable"
       PCR_AUTO_MIGRATE: "true"
       PCR_REQUIRE_AUTH_READS: "true"
       PCR_COOKIE_SECURE: "false"
     restart: unless-stopped
 
 volumes:
-  pcr-data:
+  postgres-data:

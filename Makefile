@@ -45,13 +45,14 @@ audit:
 #   make smoke-docker  hits whatever is on :8080 (e.g. `make docker-compose-up` first)
 # Override SMOKE_TOKEN to match PCR_API_TOKENS on the target.
 SMOKE_TOKEN ?= smoke-token-abc
+SMOKE_DATABASE_URL ?= $(PCR_DATABASE_URL)
 SMOKE_DOCKER_URL ?= http://localhost:8080
 SMOKE_DOCKER_TOKEN ?= changeme
 DEMO_URL ?= http://127.0.0.1:18082
 DEMO_TOKEN ?= demo-token
 
 smoke:
-	go run ./cmd/smoke --start-local --token=$(SMOKE_TOKEN)
+	go run ./cmd/smoke --start-local --token=$(SMOKE_TOKEN) --database-url='$(SMOKE_DATABASE_URL)'
 
 smoke-docker:
 	go run ./cmd/smoke --base-url=$(SMOKE_DOCKER_URL) --token=$(SMOKE_DOCKER_TOKEN)
@@ -66,10 +67,11 @@ docker-build:
 	docker build -t pcr-server .
 
 docker-run: docker-build
+	@test -n "$${PCR_DATABASE_URL}" || (echo "PCR_DATABASE_URL is required" >&2; exit 2)
 	docker run --rm -p 8080:8080 \
 		-e PCR_API_TOKENS=$${PCR_API_TOKENS:-changeme} \
 		-e PCR_SESSION_SECRET=$${PCR_SESSION_SECRET:-dev-default-please-override-in-production} \
-		-v pcr-data:/data \
+		-e PCR_DATABASE_URL \
 		pcr-server
 
 docker-compose-up:

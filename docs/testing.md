@@ -1,6 +1,6 @@
 # Testing Guide
 
-The repository has unit tests, SQLite integration tests, and an HTTP smoke-test client. The commands below reflect the current append-only API.
+The repository has unit tests, real-PostgreSQL integration tests, and an HTTP smoke-test client. The commands below reflect the current append-only API.
 
 ## Automated tests
 
@@ -10,22 +10,24 @@ Run the default test suite with the race detector and package coverage:
 make test
 ```
 
-Run tests that exercise a real temporary SQLite database and apply the embedded migrations:
+Set a PostgreSQL test URL. Integration tests create and remove isolated schemas in this database:
 
 ```bash
+export PCR_TEST_POSTGRES_URL='postgres://pcr@127.0.0.1/pcr_test?sslmode=disable'
 go test -race -tags=integration ./...
 ```
 
-Run the end-to-end smoke suite against an ephemeral local server:
+Run the end-to-end smoke suite against a local server using an isolated PostgreSQL schema:
 
 ```bash
+export PCR_DATABASE_URL='postgres://pcr@127.0.0.1/pcr_test?sslmode=disable'
 make smoke
 ```
 
-Run the seeded real-SQLite dashboard functional test:
+Run the seeded real-PostgreSQL dashboard functional test:
 
 ```bash
-go test -tags=integration ./internal/handler -run TestSeededDashboardViews
+PCR_TEST_POSTGRES_URL="$PCR_TEST_POSTGRES_URL" go test -tags=integration ./internal/handler -run TestSeededDashboardViews
 ```
 
 It loads `testdata/functional/phosphor-demo.json` and exercises Current, Site-wide, History, Alerts, lifecycle reduction, link annotations, alert toggling, operation closure, safely escaped link labels, the activity trail, the severity banner, and locally embedded font delivery through the real router.
@@ -52,6 +54,7 @@ For local HTTP testing, disable secure-only cookies:
 ```bash
 make build
 export PCR_API_TOKENS=test-token
+export PCR_DATABASE_URL='postgres://pcr@127.0.0.1/pcr?sslmode=disable'
 export PCR_COOKIE_SECURE=false
 ./bin/pcr-server
 ```

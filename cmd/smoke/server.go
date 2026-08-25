@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,15 +14,21 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// localServer manages a pcr-server subprocess against an ephemeral DB.
+// localServer manages a pcr-server subprocess against an isolated PostgreSQL schema.
 // Lifecycle: build (if missing) -> spawn -> waitReady -> stop.
 type localServer struct {
-	binaryPath string
-	addr       string
-	token      string
-	keepData   bool
+	binaryPath  string
+	addr        string
+	token       string
+	keepData    bool
+	databaseURL string
+	schema      string
+	adminPool   *pgxpool.Pool
 
 	cmd     *exec.Cmd
 	tempDir string
@@ -34,12 +41,13 @@ type localServer struct {
 }
 
 // newLocalServer prepares a server config but does not start it.
-func newLocalServer(binaryPath, addr, token string, keepData bool) *localServer {
+func newLocalServer(binaryPath, addr, token, databaseURL string, keepData bool) *localServer {
 	return &localServer{
-		binaryPath: binaryPath,
-		addr:       addr,
-		token:      token,
-		keepData:   keepData,
+		binaryPath:  binaryPath,
+		addr:        addr,
+		token:       token,
+		databaseURL: databaseURL,
+		keepData:    keepData,
 	}
 }
 
@@ -50,6 +58,15 @@ func (s *localServer) start(ctx context.Context) error {
 	if err := s.ensureBinary(ctx); err != nil {
 		return err
 	}
+	if err := s.prepareDatabase(ctx); err != nil {
+		return err
+	}
+	started := false
+	defer func() {
+		if !started {
+			s.stop()
+		}
+	}()
 
 	tempDir, err := os.MkdirTemp("", "pcr-smoke-*")
 	if err != nil {
@@ -71,7 +88,7 @@ func (s *localServer) start(ctx context.Context) error {
 		// At least 32 bytes so config.loadSessionSecret accepts it.
 		"PCR_SESSION_SECRET=smoke-session-secret-with-padding-xx",
 		"PCR_COOKIE_SECURE=false",
-		"PCR_DATABASE_PATH="+filepath.Join(tempDir, "registry.db"),
+		"PCR_DATABASE_URL="+s.databaseURL,
 		"PCR_ADDR="+s.addr,
 	)
 	cmd.Stdout = logFile
@@ -91,7 +108,43 @@ func (s *localServer) start(ctx context.Context) error {
 		_ = cmd.Wait()
 		close(s.exited)
 	}()
+	started = true
 	return nil
+}
+
+func (s *localServer) prepareDatabase(ctx context.Context) error {
+	s.schema = "pcr_smoke_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	databaseURL, err := databaseURLWithSearchPath(s.databaseURL, s.schema)
+	if err != nil {
+		return err
+	}
+
+	adminPool, err := pgxpool.New(ctx, s.databaseURL)
+	if err != nil {
+		return fmt.Errorf("open PostgreSQL admin pool: %w", err)
+	}
+	if _, err := adminPool.Exec(ctx, "CREATE SCHEMA "+s.schema); err != nil {
+		adminPool.Close()
+		return fmt.Errorf("create smoke schema %q: %w", s.schema, err)
+	}
+
+	s.adminPool = adminPool
+	s.databaseURL = databaseURL
+	return nil
+}
+
+func databaseURLWithSearchPath(databaseURL, schema string) (string, error) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse PostgreSQL URL: %w", err)
+	}
+	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
+		return "", fmt.Errorf("parse PostgreSQL URL: unsupported scheme %q", parsed.Scheme)
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 // waitReady polls /api/v1/health until 200 or the deadline expires.
@@ -146,7 +199,18 @@ func (s *localServer) stop() {
 	if s.logFile != nil {
 		_ = s.logFile.Close()
 	}
+	if s.adminPool != nil {
+		if !s.keepData && s.schema != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, _ = s.adminPool.Exec(ctx, "DROP SCHEMA "+s.schema+" CASCADE")
+			cancel()
+		}
+		s.adminPool.Close()
+		s.adminPool = nil
+	}
 	if s.tempDir != "" && !s.keepData {
+		// tempDir is created internally by os.MkdirTemp and is never caller-supplied.
+		//nolint:gosec // G703: removal is constrained to the owned temporary directory
 		_ = os.RemoveAll(s.tempDir)
 	}
 }
@@ -157,7 +221,8 @@ func (s *localServer) dumpLog(w io.Writer) {
 	if s.logFile == nil {
 		return
 	}
-	f, err := os.Open(s.logFile.Name())
+	// logFile is created under the owned temporary directory in start.
+	f, err := os.Open(s.logFile.Name()) //nolint:gosec // G703: path comes from the process-owned file handle
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "(failed to open server log %s: %v)\n", s.logFile.Name(), err)
 		return
@@ -170,14 +235,14 @@ func (s *localServer) dumpLog(w io.Writer) {
 
 // ensureBinary builds the server binary if it doesn't already exist at binaryPath.
 func (s *localServer) ensureBinary(ctx context.Context) error {
-	if _, err := os.Stat(s.binaryPath); err == nil {
+	if _, err := os.Stat(s.binaryPath); err == nil { //nolint:gosec // G703: operator-selected read/build target
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat %s: %w", s.binaryPath, err)
 	}
 
 	fmt.Printf("    (building %s ...)\n", s.binaryPath)
-	if err := os.MkdirAll(filepath.Dir(s.binaryPath), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.binaryPath), 0o750); err != nil { //nolint:gosec // G703: operator-selected build target
 		return fmt.Errorf("create bin dir: %w", err)
 	}
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", s.binaryPath, "./cmd/server") //nolint:gosec // hardcoded args, no user input

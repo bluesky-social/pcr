@@ -5,8 +5,9 @@ metadata:
   namespace: pcr
 data:
   PCR_ADDR: ":8080"
-  PCR_DATABASE_PATH: "/data/registry.db"
   PCR_AUTO_MIGRATE: "true"
+  PCR_DB_MAX_CONNECTIONS: "10"
+  PCR_DB_CONNECT_TIMEOUT: "5s"
   PCR_REQUIRE_AUTH_READS: "true"
   PCR_DASHBOARD_REFRESH_SEC: "60"
   PCR_COOKIE_SECURE: "true"

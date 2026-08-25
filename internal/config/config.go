@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ import (
 // Config holds the application configuration sourced from environment variables.
 type Config struct {
 	Addr                 string
-	DatabasePath         string
+	DatabaseURL          string
 	APITokens            []string
 	SessionSecret        []byte
 	CookieSecure         bool
@@ -23,7 +24,8 @@ type Config struct {
 	ReadTimeout          time.Duration
 	WriteTimeout         time.Duration
 	ShutdownTimeout      time.Duration
-	DBBusyTimeout        time.Duration
+	DBConnectTimeout     time.Duration
+	DBMaxConnections     int
 	DBSlowQueryThreshold time.Duration
 }
 
@@ -32,7 +34,7 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		Addr:                 envOrDefault("PCR_ADDR", ":8080"),
-		DatabasePath:         envOrDefault("PCR_DATABASE_PATH", "registry.db"),
+		DatabaseURL:          os.Getenv("PCR_DATABASE_URL"),
 		CookieSecure:         true,
 		RequireAuthReads:     true,
 		AutoMigrate:          true,
@@ -40,12 +42,16 @@ func Load() (*Config, error) {
 		ReadTimeout:          5 * time.Second,
 		WriteTimeout:         10 * time.Second,
 		ShutdownTimeout:      15 * time.Second,
-		DBBusyTimeout:        5 * time.Second,
+		DBConnectTimeout:     5 * time.Second,
+		DBMaxConnections:     10,
 		DBSlowQueryThreshold: 100 * time.Millisecond,
 	}
 
 	if err := loadAPITokens(cfg); err != nil {
 		return nil, err
+	}
+	if cfg.DatabaseURL == "" {
+		return nil, fmt.Errorf("PCR_DATABASE_URL is required but not set")
 	}
 	if err := loadSessionSecret(cfg); err != nil {
 		return nil, err
@@ -59,7 +65,8 @@ func Load() (*Config, error) {
 		optionalEnv("PCR_READ_TIMEOUT", time.ParseDuration, &cfg.ReadTimeout),
 		optionalEnv("PCR_WRITE_TIMEOUT", time.ParseDuration, &cfg.WriteTimeout),
 		optionalEnv("PCR_SHUTDOWN_TIMEOUT", time.ParseDuration, &cfg.ShutdownTimeout),
-		optionalEnv("PCR_DB_BUSY_TIMEOUT", time.ParseDuration, &cfg.DBBusyTimeout),
+		optionalEnv("PCR_DB_CONNECT_TIMEOUT", time.ParseDuration, &cfg.DBConnectTimeout),
+		optionalEnv("PCR_DB_MAX_CONNECTIONS", strconv.Atoi, &cfg.DBMaxConnections),
 		optionalEnv("PCR_DB_SLOW_QUERY_THRESHOLD", time.ParseDuration, &cfg.DBSlowQueryThreshold),
 	} {
 		if err != nil {
@@ -85,12 +92,15 @@ func validate(cfg *Config) error {
 		{key: "PCR_READ_TIMEOUT", value: cfg.ReadTimeout},
 		{key: "PCR_WRITE_TIMEOUT", value: cfg.WriteTimeout},
 		{key: "PCR_SHUTDOWN_TIMEOUT", value: cfg.ShutdownTimeout},
-		{key: "PCR_DB_BUSY_TIMEOUT", value: cfg.DBBusyTimeout},
+		{key: "PCR_DB_CONNECT_TIMEOUT", value: cfg.DBConnectTimeout},
 		{key: "PCR_DB_SLOW_QUERY_THRESHOLD", value: cfg.DBSlowQueryThreshold},
 	} {
 		if timeout.value <= 0 {
 			return fmt.Errorf("%s must be greater than 0", timeout.key)
 		}
+	}
+	if cfg.DBMaxConnections <= 0 || cfg.DBMaxConnections > math.MaxInt32 {
+		return fmt.Errorf("PCR_DB_MAX_CONNECTIONS must be between 1 and %d", math.MaxInt32)
 	}
 	return nil
 }

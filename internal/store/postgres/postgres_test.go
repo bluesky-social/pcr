@@ -1,24 +1,27 @@
 //go:build integration
 
-package sqlite_test
+package postgres_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
-	"path/filepath"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	"github.com/sarah/go-prod-change-registry/internal/store"
-	"github.com/sarah/go-prod-change-registry/internal/store/sqlite"
-	"github.com/sarah/go-prod-change-registry/migrations"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
-	_ "modernc.org/sqlite"
+	"github.com/sarah/go-prod-change-registry/internal/model"
+	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
+	"github.com/sarah/go-prod-change-registry/internal/store"
+	"github.com/sarah/go-prod-change-registry/internal/store/postgres"
+	"github.com/sarah/go-prod-change-registry/migrations"
 )
 
 // ---------------------------------------------------------------------------
@@ -26,48 +29,70 @@ import (
 // ---------------------------------------------------------------------------
 
 // applyTestMigrations reads and executes the embedded migration SQL files in order.
-func applyTestMigrations(t *testing.T, db *sql.DB) {
+func applyTestMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	ctx := t.Context()
-	migrationFiles := []string{
-		"001_create_change_events.up.sql",
-	}
-	for _, name := range migrationFiles {
-		sqlBytes, err := fs.ReadFile(migrations.FS, name)
-		if err != nil {
-			t.Fatalf("read migration %s: %v", name, err)
-		}
-		if _, err := db.ExecContext(ctx, string(sqlBytes)); err != nil {
-			t.Fatalf("apply migration %s: %v", name, err)
-		}
-	}
-}
-
-func openTestDB(t *testing.T, dbPath string) *sql.DB {
-	t.Helper()
-	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate",
-		dbPath,
-	)
-	db, err := sql.Open("sqlite", dsn)
+	sqlBytes, err := fs.ReadFile(migrations.FS, "001_create_change_events.up.sql")
 	if err != nil {
-		t.Fatalf("openTestDB: %v", err)
+		t.Fatalf("read migration: %v", err)
 	}
-	return db
+	if _, err := pool.Exec(t.Context(), string(sqlBytes)); err != nil {
+		t.Fatalf("apply migration: %v", err)
+	}
 }
 
-func newTestStore(t *testing.T) *sqlite.Store {
+func newTestStore(t *testing.T) *postgres.Store {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db := openTestDB(t, dbPath)
-	applyTestMigrations(t, db)
-	s := sqlite.New(db, 100*time.Millisecond)
+	return postgres.New(newTestPool(t), 100*time.Millisecond)
+}
+
+func newTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	databaseURL := isolatedDatabaseURL(t)
+	pool, err := postgresdb.Open(t.Context(), databaseURL, postgresdb.PoolOptions{
+		MaxConnections: 10,
+		ConnectTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("open PostgreSQL test pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	applyTestMigrations(t, pool)
+	return pool
+}
+
+func isolatedDatabaseURL(t *testing.T) string {
+	t.Helper()
+	databaseURL := os.Getenv("PCR_TEST_POSTGRES_URL")
+	if databaseURL == "" {
+		t.Skip("PCR_TEST_POSTGRES_URL is not set")
+	}
+
+	admin, err := pgxpool.New(t.Context(), databaseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL test admin pool: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	schema := "pcr_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := admin.Exec(t.Context(), "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create test schema %q: %v", schema, err)
+	}
 	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("db close: %v", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop test schema %q: %v", schema, err)
 		}
 	})
-	return s
+
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatalf("parse PCR_TEST_POSTGRES_URL: %v", err)
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func mustTime(t *testing.T, value string) time.Time {
@@ -259,34 +284,27 @@ func TestCreate(t *testing.T) {
 func TestChangeEventTagKeysAreUnique(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db := openTestDB(t, dbPath)
-	applyTestMigrations(t, db)
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("db close: %v", err)
-		}
-	})
+	pool := newTestPool(t)
 
-	_, err := db.ExecContext(
+	_, err := pool.Exec(
 		t.Context(),
 		`INSERT INTO change_events
 		 (id, user_name, timestamp, event_type, description, long_description, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		"event-with-tag",
 		"alice",
-		"2026-08-24T12:00:00Z",
+		mustTime(t, "2026-08-24T12:00:00Z"),
 		model.EventTypeDeployment,
 		"test event",
 		"",
-		"2026-08-24T12:00:00Z",
+		mustTime(t, "2026-08-24T12:00:00Z"),
 	)
 	if err != nil {
 		t.Fatalf("insert event: %v", err)
 	}
-	if _, err := db.ExecContext(
+	if _, err := pool.Exec(
 		t.Context(),
-		`INSERT INTO change_event_tags (event_id, key, value) VALUES (?, ?, ?)`,
+		`INSERT INTO change_event_tags (event_id, key, value) VALUES ($1, $2, $3)`,
 		"event-with-tag",
 		"team",
 		"payments",
@@ -294,9 +312,9 @@ func TestChangeEventTagKeysAreUnique(t *testing.T) {
 		t.Fatalf("insert first tag: %v", err)
 	}
 
-	_, err = db.ExecContext(
+	_, err = pool.Exec(
 		t.Context(),
-		`INSERT INTO change_event_tags (event_id, key, value) VALUES (?, ?, ?)`,
+		`INSERT INTO change_event_tags (event_id, key, value) VALUES ($1, $2, $3)`,
 		"event-with-tag",
 		"team",
 		"platform",
@@ -394,6 +412,66 @@ func TestToggleStarIsAtomic(t *testing.T) {
 	}
 	if !annotations.Starred {
 		t.Fatal("odd number of toggles left event unstarred")
+	}
+}
+
+func TestToggleStarIsAtomicAcrossPools(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := isolatedDatabaseURL(t)
+	openPool := func() *pgxpool.Pool {
+		pool, err := postgresdb.Open(t.Context(), databaseURL, postgresdb.PoolOptions{
+			MaxConnections: 10,
+			ConnectTimeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("open PostgreSQL test pool: %v", err)
+		}
+		t.Cleanup(pool.Close)
+		return pool
+	}
+
+	firstPool := openPool()
+	secondPool := openPool()
+	applyTestMigrations(t, firstPool)
+	stores := []*postgres.Store{
+		postgres.New(firstPool, time.Second),
+		postgres.New(secondPool, time.Second),
+	}
+
+	parent := makeEvent("cross-pool-toggle-parent", "alice", model.EventTypeDeployment, time.Now().UTC(), nil)
+	if _, err := stores[0].Create(t.Context(), parent); err != nil {
+		t.Fatalf("Create(parent) error = %v", err)
+	}
+
+	const toggles = 20
+	ctx := t.Context()
+	start := make(chan struct{})
+	errs := make(chan error, toggles)
+	var wg sync.WaitGroup
+	for i := range toggles {
+		store := stores[i%len(stores)]
+		wg.Go(func() {
+			<-start
+			_, err := store.ToggleStar(ctx, parent.ID, "concurrent-user")
+			errs <- err
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("ToggleStar() error = %v", err)
+		}
+	}
+
+	annotations, err := stores[1].GetAnnotations(t.Context(), parent.ID)
+	if err != nil {
+		t.Fatalf("GetAnnotations() error = %v", err)
+	}
+	if annotations.Starred {
+		t.Fatal("even number of cross-pool toggles left event starred")
 	}
 }
 
@@ -638,7 +716,7 @@ func TestGetByID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // seedEvents inserts a known set of events for list tests and returns them.
-func seedEvents(t *testing.T, s *sqlite.Store) []model.ChangeEvent {
+func seedEvents(t *testing.T, s *postgres.Store) []model.ChangeEvent {
 	t.Helper()
 	ctx := context.Background()
 
@@ -1172,7 +1250,7 @@ func TestListCurrentByCorrelation(t *testing.T) {
 	assertEventIDs(t, result.Events, []string{"wanted"})
 }
 
-func createCurrentFixtures(t *testing.T, s *sqlite.Store, events ...*model.ChangeEvent) {
+func createCurrentFixtures(t *testing.T, s *postgres.Store, events ...*model.ChangeEvent) {
 	t.Helper()
 	for _, event := range events {
 		if _, err := s.Create(t.Context(), event); err != nil {

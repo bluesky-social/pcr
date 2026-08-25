@@ -12,18 +12,15 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata
 
-# Create a non-root user and data directory
-RUN addgroup -S pcr && adduser -S pcr -G pcr && \
-    mkdir -p /data && chown pcr:pcr /data
+# Create a non-root runtime user.
+RUN addgroup -S pcr && adduser -S pcr -G pcr
 USER pcr
-VOLUME ["/data"]
 
 COPY --from=builder /bin/pcr-server /usr/local/bin/pcr-server
 
 EXPOSE 8080
 
 ENV PCR_ADDR=:8080 \
-    PCR_DATABASE_PATH=/data/registry.db \
     PCR_AUTO_MIGRATE=true
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

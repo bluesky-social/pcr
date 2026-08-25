@@ -92,7 +92,7 @@ func (m *mockStore) Close() error { return nil }
 
 type mockPinger struct{}
 
-func (p *mockPinger) PingContext(_ context.Context) error { return nil }
+func (p *mockPinger) Ping(_ context.Context) error { return nil }
 
 const testToken = "test-secret-token"
 

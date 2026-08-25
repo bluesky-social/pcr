@@ -1,14 +1,11 @@
 # go-prod-change-registry
 
-A lightweight, append-only change registry for production environments. It records deployments, feature-flag flips, infrastructure mutations, and other production changes as immutable events in a SQLite-backed store, then exposes them through a RESTful API and an HTML dashboard. Derived annotations identify events that are currently starred or have an active alert. Teams can use it to correlate production changes with incidents and understand what changed, when, and by whom.
+A lightweight, append-only change registry for production environments. It records deployments, feature-flag flips, infrastructure mutations, and other production changes as immutable events in PostgreSQL, then exposes them through a RESTful API and an HTML dashboard. Derived annotations identify events that are currently starred or have an active alert. Teams can use it to correlate production changes with incidents and understand what changed, when, and by whom.
 
 ## Quickstart
 
 ```bash
-make build
-export PCR_API_TOKENS="my-secret-token"
-export PCR_COOKIE_SECURE=false # local HTTP only
-./bin/pcr-server
+PCR_API_TOKENS=my-secret-token docker compose up -d --build
 ```
 
 The server starts on `:8080` by default. Navigate to `http://localhost:8080/login` and enter your token to access the dashboard.
@@ -21,14 +18,15 @@ All configuration is via environment variables prefixed with `PCR_`.
 |---|---|---|---|
 | `PCR_API_TOKENS` | Yes | -- | Comma-separated list of valid API tokens |
 | `PCR_ADDR` | No | `:8080` | Listen address (`host:port`) |
-| `PCR_DATABASE_PATH` | No | `registry.db` | Path to the SQLite database file |
+| `PCR_DATABASE_URL` | Yes | -- | PostgreSQL connection URL; require TLS outside local development |
 | `PCR_REQUIRE_AUTH_READS` | No | `true` | Require auth for read endpoints (GET) |
 | `PCR_AUTO_MIGRATE` | No | `true` | Run database migrations on startup |
 | `PCR_DASHBOARD_REFRESH_SEC` | No | `60` | Dashboard auto-refresh interval in seconds |
 | `PCR_READ_TIMEOUT` | No | `5s` | HTTP server read timeout (Go duration) |
 | `PCR_WRITE_TIMEOUT` | No | `10s` | HTTP server write timeout (Go duration) |
 | `PCR_SHUTDOWN_TIMEOUT` | No | `15s` | Graceful shutdown timeout (Go duration) |
-| `PCR_DB_BUSY_TIMEOUT` | No | `5s` | SQLite busy/write-lock wait timeout |
+| `PCR_DB_CONNECT_TIMEOUT` | No | `5s` | PostgreSQL startup connection timeout |
+| `PCR_DB_MAX_CONNECTIONS` | No | `10` | Maximum PostgreSQL connections per server process |
 | `PCR_DB_SLOW_QUERY_THRESHOLD` | No | `100ms` | Log a warning when a query exceeds this |
 | `PCR_SESSION_SECRET` | No | (random) | HMAC key for dashboard session cookies. **Must be at least 32 bytes if set.** When unset, an ephemeral 32-byte secret is generated; sessions then expire on every restart. See [Production session secret](#production-session-secret) below |
 | `PCR_COOKIE_SECURE` | No | `true` | Set the `Secure` flag on session cookies (requires HTTPS). Set to `false` for local dev without TLS |
@@ -416,12 +414,11 @@ The shared functional fixture contains active, completed, duplicate-delivery, si
 Start a disposable server in one shell:
 
 ```bash
-DEMO_DIR=$(mktemp -d)
 PCR_API_TOKENS=demo-token \
 PCR_SESSION_SECRET=demo-session-secret-with-padding-123 \
 PCR_COOKIE_SECURE=false \
 PCR_REQUIRE_AUTH_READS=false \
-PCR_DATABASE_PATH="$DEMO_DIR/registry.db" \
+PCR_DATABASE_URL='postgres://pcr@127.0.0.1/pcr?sslmode=disable' \
 PCR_ADDR=:18082 \
 go run ./cmd/server
 ```
@@ -461,7 +458,8 @@ cmd/server/        Entry point (main)
 internal/
   config/          Environment-based configuration
   model/           Domain types (ChangeEvent, ListParams, request/response structs)
-  store/           SQLite data access layer (ChangeStore interface)
+  postgres/        PostgreSQL pool and migration lifecycle
+  store/           PostgreSQL data access layer (ChangeStore interface)
   service/         Business logic
   handler/         HTTP handlers (API + dashboard)
   middleware/      Auth, request ID, logging
@@ -477,7 +475,7 @@ Four deployment options, from simplest to most production-like:
 
 | Method | Command | Best for |
 |---|---|---|
-| **Binary** | `make build && PCR_API_TOKENS=token ./bin/pcr-server` | Local development |
+| **Binary** | `make build && PCR_API_TOKENS=token PCR_DATABASE_URL=... ./bin/pcr-server` | Local development |
 | **Docker** | `make docker-run` | Containerized local testing |
 | **Docker Compose** | `PCR_API_TOKENS=token docker compose up -d --build` | Local dev with persistence |
 | **Kubernetes (kind)** | `kind create cluster` + `kubectl apply -f k8s/` | Testing k8s deployment |
@@ -525,10 +523,10 @@ For any deployment beyond a developer laptop, override it. Two pieces:
      docker run --rm -p 8080:8080 \
        -e PCR_API_TOKENS=... \
        -e PCR_SESSION_SECRET \
-       -v pcr-data:/data pcr-server
+       -e PCR_DATABASE_URL pcr-server
      ```
 
-   - **Kubernetes** -- store in a `Secret` and reference it from the Deployment via `envFrom` or `valueFrom.secretKeyRef`. The shipped `k8s/secret.yaml` template has placeholders for both `api-tokens` and `session-secret`; fill them with real values before `kubectl apply`. See [docs/deployment.md](docs/deployment.md) for the full Kubernetes walkthrough.
+   - **Kubernetes** -- store credentials in a `Secret` and reference them from the Deployment. The shipped `k8s/secret.yaml` template has placeholders for `api-tokens`, `session-secret`, and `database-url`; replace all three before applying it. See [docs/deployment.md](docs/deployment.md) for the full Kubernetes walkthrough.
 
    - **Other orchestrators / hosted environments** -- inject from your platform's secret manager (AWS SSM Parameter Store, GCP Secret Manager, HashiCorp Vault, GitHub Actions secrets, ...) into the container's environment.
 
@@ -560,6 +558,7 @@ Rotating the secret invalidates every existing session and CSRF token; users wil
 ### Integration tests
 
 ```bash
+export PCR_TEST_POSTGRES_URL='postgres://pcr@127.0.0.1/pcr_test?sslmode=disable'
 go test -race -tags=integration ./...
 ```
 

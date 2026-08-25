@@ -16,7 +16,7 @@ import (
 
 // Pinger tests database connectivity.
 type Pinger interface {
-	PingContext(ctx context.Context) error
+	Ping(ctx context.Context) error
 }
 
 // APIHandler serves the REST/JSON API.
@@ -32,7 +32,7 @@ func NewAPIHandler(svc *service.ChangeService, db Pinger) *APIHandler {
 
 // HealthCheck verifies that the service is running and the database is reachable.
 func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	if err := h.db.PingContext(r.Context()); err != nil {
+	if err := h.db.Ping(r.Context()); err != nil {
 		slog.ErrorContext(r.Context(), "health check failed: database unreachable", "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
