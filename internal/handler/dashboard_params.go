@@ -25,11 +25,20 @@ func parseDashboardRequest(r *http.Request) (model.ListParams, dashboardFilters)
 	q := r.URL.Query()
 
 	params := model.ListParams{TopLevel: true}
-	filters := dashboardFilters{}
+	filters := dashboardFilters{
+		View:       dashboardView(q),
+		Team:       q.Get("team"),
+		Scopes:     q["scope"],
+		Severities: q["severity"],
+	}
+	if filters.Team == "" {
+		filters.Team = q.Get("for_team")
+	}
 
-	parseDashboardRange(q, &params, &filters)
-
-	if q.Get("alerted") == "true" {
+	if filters.View == "history" || filters.View == "alerts" {
+		parseDashboardRange(q, &params, &filters)
+	}
+	if filters.View == "alerts" {
 		filters.Alerted = true
 		params.AlertedOnly = true
 	}
@@ -39,17 +48,33 @@ func parseDashboardRequest(r *http.Request) (model.ListParams, dashboardFilters)
 		params.EventType = v
 	}
 
-	if v := q.Get("user"); v != "" {
-		filters.UserName = v
-		params.UserName = v
+	if filters.View == "history" || filters.View == "alerts" {
+		if v := q.Get("user"); v != "" {
+			filters.UserName = v
+			params.UserName = v
+		}
+		parseDashboardTags(q, &params, &filters)
 	}
-
-	parseDashboardTags(q, &params, &filters)
 
 	params.Limit = parseBoundedInt(q, "limit", 1, model.DashboardLimit)
 	params.Offset = parseBoundedInt(q, "offset", 0, 0)
 
 	return params, filters
+}
+
+func dashboardView(q url.Values) string {
+	view := q.Get("view")
+	switch view {
+	case "current", "site", "history", "alerts":
+		return view
+	case "":
+		if q.Get("alerted") == "true" {
+			return "alerts"
+		}
+		return "history"
+	default:
+		return "history"
+	}
 }
 
 // parseDashboardRange handles the "range" query parameter: either a

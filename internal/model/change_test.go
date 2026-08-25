@@ -37,6 +37,32 @@ func TestEffectiveLimit(t *testing.T) {
 	}
 }
 
+func TestCurrentParamsEffectiveLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{name: "zero defaults to 50", limit: 0, want: model.DefaultLimit},
+		{name: "negative defaults to 50", limit: -1, want: model.DefaultLimit},
+		{name: "explicit limit", limit: 25, want: 25},
+		{name: "above max clamps to 200", limit: model.MaxLimit + 1, want: model.MaxLimit},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			params := model.CurrentParams{Limit: tc.limit}
+			if got := params.EffectiveLimit(); got != tc.want {
+				t.Errorf("CurrentParams{Limit: %d}.EffectiveLimit() = %d, want %d", tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsMetaEvent(t *testing.T) {
 	t.Parallel()
 

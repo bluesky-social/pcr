@@ -2,7 +2,10 @@ package service_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,8 +20,10 @@ import (
 type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
 	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
+	toggleAlertFn         func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
+	listCurrentFn         func(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
 	getAnnotationsBatchFn func(ctx context.Context, eventIDs []string) (map[string]*model.EventAnnotations, error)
 }
@@ -37,6 +42,13 @@ func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*
 	return m.toggleStarFn(ctx, eventID, userName)
 }
 
+func (m *mockStore) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	if m.toggleAlertFn == nil {
+		panic("unexpected call to ToggleAlert")
+	}
+	return m.toggleAlertFn(ctx, eventID, userName)
+}
+
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
 	if m.getByIDFn == nil {
 		panic("unexpected call to GetByID")
@@ -49,6 +61,13 @@ func (m *mockStore) List(ctx context.Context, params model.ListParams) (*model.L
 		panic("unexpected call to List")
 	}
 	return m.listFn(ctx, params)
+}
+
+func (m *mockStore) ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error) {
+	if m.listCurrentFn == nil {
+		panic("unexpected call to ListCurrent")
+	}
+	return m.listCurrentFn(ctx, params)
 }
 
 func (m *mockStore) GetAnnotations(ctx context.Context, eventID string) (*model.EventAnnotations, error) {
@@ -98,7 +117,11 @@ func TestCreate(t *testing.T) {
 			EventType:       model.EventTypeDeployment,
 			Description:     "deploy v42",
 			LongDescription: "full rollout of v42",
-			Tags:            map[string]string{"env": "prod"},
+			Links: []model.EventLink{
+				{Label: "Pull request", URL: "https://github.com/example/repo/pull/42"},
+				{Label: "Runbook", URL: "https://notion.so/example/runbook"},
+			},
+			Tags: map[string]string{"env": "prod"},
 		}
 
 		got, err := svc.Create(context.Background(), req)
@@ -135,6 +158,9 @@ func TestCreate(t *testing.T) {
 		if got.LongDescription != "full rollout of v42" {
 			t.Errorf("LongDescription = %q, want %q", got.LongDescription, "full rollout of v42")
 		}
+		if len(got.Links) != 2 || got.Links[0].Label != "Pull request" || got.Links[1].URL != "https://notion.so/example/runbook" {
+			t.Errorf("Links = %#v, want request links in order", got.Links)
+		}
 		if got.Tags["env"] != "prod" {
 			t.Errorf("Tags[env] = %q, want %q", got.Tags["env"], "prod")
 		}
@@ -144,6 +170,36 @@ func TestCreate(t *testing.T) {
 
 		if captured == nil {
 			t.Fatal("store.Create was not called")
+		}
+		if len(captured.Links) != 2 {
+			t.Errorf("captured Links = %#v, want 2 links", captured.Links)
+		}
+	})
+
+	t.Run("invalid link URL errors before storage", func(t *testing.T) {
+		t.Parallel()
+
+		for name, link := range map[string]model.EventLink{
+			"script scheme":        {Label: "unsafe", URL: "javascript:alert(1)"},
+			"embedded credentials": {Label: "deceptive", URL: "https://trusted.example@evil.example/path"},
+			"encoded newline":      {Label: "control", URL: "https://example.com/%0aevil"},
+			"backslash":            {Label: "ambiguous", URL: `https://example.com\@evil.example/path`},
+			"encoded backslash":    {Label: "ambiguous", URL: `https://example.com/%5c@evil.example/path`},
+			"oversized URL":        {Label: "large", URL: "https://example.com/" + strings.Repeat("a", 2049)},
+			"control in label":     {Label: "bad\nlabel", URL: "https://example.com/path"},
+			"bidi override label":  {Label: "safe\u202Eexample", URL: "https://example.com/path"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				_, err := service.NewChangeService(&mockStore{}).Create(context.Background(), &model.CreateChangeRequest{
+					UserName:  "alice",
+					EventType: model.EventTypeDeployment,
+					Links:     []model.EventLink{link},
+				})
+				if !errors.Is(err, service.ErrInvalidLink) {
+					t.Fatalf("got error %v, want %v", err, service.ErrInvalidLink)
+				}
+			})
 		}
 	})
 
@@ -288,6 +344,228 @@ func TestCreate(t *testing.T) {
 			t.Fatalf("Timestamp = %v (%v), want %v (UTC)", got.Timestamp, got.Timestamp.Location(), want)
 		}
 	})
+}
+
+func TestAddLinks(t *testing.T) {
+	t.Parallel()
+
+	parent := &model.ChangeEvent{ID: "parent-1", UserName: "alice", EventType: model.EventTypeDeployment}
+	var created *model.ChangeEvent
+	ms := &mockStore{
+		getByIDFn: func(_ context.Context, id string) (*model.ChangeEvent, error) {
+			if id != parent.ID {
+				t.Errorf("GetByID(%q), want %q", id, parent.ID)
+			}
+			return parent, nil
+		},
+		createFn: func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			created = event
+			return event, nil
+		},
+	}
+	svc := service.NewChangeService(ms)
+	links := []model.EventLink{
+		{Label: "Incident", URL: "https://example.pagerduty.com/incidents/P1"},
+		{Label: "Plan", URL: "https://notion.so/example/plan"},
+	}
+	got, err := svc.AddLinks(t.Context(), parent.ID, "bob", links)
+	if err != nil {
+		t.Fatalf("AddLinks() error = %v", err)
+	}
+	if created == nil || got != created {
+		t.Fatal("AddLinks() did not return the created annotation")
+	}
+	if created.ParentID != parent.ID || created.EventType != model.EventTypeLink || created.UserName != "bob" {
+		t.Errorf("created annotation = %+v", created)
+	}
+	if len(created.Links) != 2 || created.Links[0].Label != "Incident" || created.Links[1].Label != "Plan" {
+		t.Errorf("created links = %#v", created.Links)
+	}
+}
+
+func TestAddLinksRequiresAtLeastOneLink(t *testing.T) {
+	t.Parallel()
+
+	svc := service.NewChangeService(&mockStore{})
+	_, err := svc.AddLinks(t.Context(), "parent-1", "alice", nil)
+	if !errors.Is(err, service.ErrLinksRequired) {
+		t.Fatalf("AddLinks() error = %v, want %v", err, service.ErrLinksRequired)
+	}
+}
+
+func TestGetActivityReturnsOldestFirst(t *testing.T) {
+	t.Parallel()
+
+	newer := model.ChangeEvent{ID: "newer", ParentID: "parent-1", Timestamp: time.Date(2026, 8, 24, 12, 2, 0, 0, time.UTC)}
+	older := model.ChangeEvent{ID: "older", ParentID: "parent-1", Timestamp: time.Date(2026, 8, 24, 12, 1, 0, 0, time.UTC)}
+	ms := &mockStore{
+		getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "parent-1"}, nil
+		},
+		listFn: func(_ context.Context, params model.ListParams) (*model.ListResult, error) {
+			if params.ParentID != "parent-1" || params.Limit != model.MaxLimit {
+				t.Errorf("List params = %+v", params)
+			}
+			return &model.ListResult{Events: []model.ChangeEvent{newer, older}, TotalCount: 2}, nil
+		},
+	}
+	activity, err := service.NewChangeService(ms).GetActivity(t.Context(), "parent-1")
+	if err != nil {
+		t.Fatalf("GetActivity() error = %v", err)
+	}
+	if len(activity) != 2 || activity[0].ID != "older" || activity[1].ID != "newer" {
+		t.Errorf("activity = %#v, want oldest first", activity)
+	}
+}
+
+func TestGetActivityIncludesCorrelatedClosure(t *testing.T) {
+	t.Parallel()
+
+	start := &model.ChangeEvent{ID: "start", EventType: "deployment", Tags: map[string]string{"phase": "start", "change_id": "change-1"}}
+	closure := model.ChangeEvent{ID: "end", EventType: "deployment", Description: "rollout complete", Tags: map[string]string{"phase": "end", "change_id": "change-1"}}
+	ms := &mockStore{
+		getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) { return start, nil },
+		listFn: func(_ context.Context, params model.ListParams) (*model.ListResult, error) {
+			if params.ParentID != "" {
+				return &model.ListResult{}, nil
+			}
+			if !params.TopLevel || params.EventType != "deployment" || params.Tags["phase"] != "end" || params.Tags["change_id"] != "change-1" {
+				t.Errorf("closure List params = %+v", params)
+			}
+			return &model.ListResult{Events: []model.ChangeEvent{closure}}, nil
+		},
+	}
+	activity, err := service.NewChangeService(ms).GetActivity(t.Context(), start.ID)
+	if err != nil {
+		t.Fatalf("GetActivity() error = %v", err)
+	}
+	if len(activity) != 1 || activity[0].ID != closure.ID {
+		t.Errorf("activity = %#v, want closure", activity)
+	}
+}
+
+func TestGetActivityPaginatesPastMaxListSize(t *testing.T) {
+	t.Parallel()
+
+	firstPage := make([]model.ChangeEvent, model.MaxLimit)
+	for i := range firstPage {
+		firstPage[i] = model.ChangeEvent{ID: fmt.Sprintf("event-%03d", i), Timestamp: time.Unix(int64(i), 0)}
+	}
+	last := model.ChangeEvent{ID: "event-200", Timestamp: time.Unix(model.MaxLimit, 0)}
+	ms := &mockStore{
+		getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "parent"}, nil
+		},
+		listFn: func(_ context.Context, params model.ListParams) (*model.ListResult, error) {
+			switch params.Offset {
+			case 0:
+				return &model.ListResult{Events: firstPage, TotalCount: model.MaxLimit + 1}, nil
+			case model.MaxLimit:
+				return &model.ListResult{Events: []model.ChangeEvent{last}, TotalCount: model.MaxLimit + 1}, nil
+			default:
+				t.Fatalf("unexpected activity offset %d", params.Offset)
+				return nil, nil
+			}
+		},
+	}
+	activity, err := service.NewChangeService(ms).GetActivity(t.Context(), "parent")
+	if err != nil {
+		t.Fatalf("GetActivity() error = %v", err)
+	}
+	if len(activity) != model.MaxLimit+1 {
+		t.Fatalf("activity length = %d, want %d", len(activity), model.MaxLimit+1)
+	}
+}
+
+func TestCloseOperation(t *testing.T) {
+	t.Parallel()
+
+	start := &model.ChangeEvent{
+		ID:          "start-1",
+		UserName:    "alice",
+		EventType:   model.EventTypeDeployment,
+		Description: "payments rollout",
+		Tags: map[string]string{
+			"phase": "start", "change_id": "change-1", "team": "payments", "severity": "sev2",
+		},
+	}
+	var closed *model.ChangeEvent
+	ms := &mockStore{
+		getByIDFn: func(_ context.Context, id string) (*model.ChangeEvent, error) {
+			if id != start.ID {
+				t.Errorf("GetByID(%q), want %q", id, start.ID)
+			}
+			return start, nil
+		},
+		listCurrentFn: func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
+			if params.CorrelationKey != "change_id" || params.CorrelationValue != "change-1" || params.EventType != model.EventTypeDeployment {
+				t.Errorf("ListCurrent params = %+v", params)
+			}
+			return &model.ListResult{Events: []model.ChangeEvent{*start}, TotalCount: 1}, nil
+		},
+		createFn: func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			closed = event
+			return event, nil
+		},
+	}
+	got, err := service.NewChangeService(ms).CloseOperation(t.Context(), start.ID, "bob", "rollout completed safely")
+	if err != nil {
+		t.Fatalf("CloseOperation() error = %v", err)
+	}
+	if got != closed || closed == nil {
+		t.Fatal("CloseOperation() did not return the appended event")
+	}
+	if closed.ParentID != "" || closed.EventType != start.EventType || closed.UserName != "bob" || closed.Description != "rollout completed safely" {
+		t.Errorf("closure = %+v", closed)
+	}
+	wantExternalID := fmt.Sprintf("pcr:close:%x", sha256.Sum256([]byte("deployment\x00change_id\x00change-1")))
+	if closed.ExternalID != wantExternalID || closed.Tags["phase"] != "end" || closed.Tags["change_id"] != "change-1" || closed.Tags["team"] != "payments" {
+		t.Errorf("closure identity/tags = external %q tags %#v", closed.ExternalID, closed.Tags)
+	}
+}
+
+func TestCloseOperationRejectsInvalidOrClosedEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("event is not a correlated start", func(t *testing.T) {
+		t.Parallel()
+		ms := &mockStore{getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "plain", EventType: "maintenance", Tags: map[string]string{"phase": "start"}}, nil
+		}}
+		_, err := service.NewChangeService(ms).CloseOperation(t.Context(), "plain", "bob", "")
+		if !errors.Is(err, service.ErrOperationNotClosable) {
+			t.Fatalf("error = %v, want %v", err, service.ErrOperationNotClosable)
+		}
+	})
+
+	t.Run("operation already ended", func(t *testing.T) {
+		t.Parallel()
+		ms := &mockStore{
+			getByIDFn: func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+				return &model.ChangeEvent{ID: "closed", EventType: "maintenance", Tags: map[string]string{"phase": "start", "deploy_id": "deploy-1"}}, nil
+			},
+			listCurrentFn: func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+				return &model.ListResult{}, nil
+			},
+		}
+		_, err := service.NewChangeService(ms).CloseOperation(t.Context(), "closed", "bob", "")
+		if !errors.Is(err, service.ErrOperationClosed) {
+			t.Fatalf("error = %v, want %v", err, service.ErrOperationClosed)
+		}
+	})
+}
+
+func TestOperationState(t *testing.T) {
+	t.Parallel()
+
+	start := &model.ChangeEvent{ID: "start", EventType: "maintenance", Tags: map[string]string{"phase": "start", "change_id": "change-1"}}
+	ms := &mockStore{listCurrentFn: func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+		return &model.ListResult{TotalCount: 1}, nil
+	}}
+	state, err := service.NewChangeService(ms).OperationState(t.Context(), start)
+	if err != nil || state != model.OperationStateOpen {
+		t.Fatalf("OperationState() = %q, %v; want open", state, err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +752,63 @@ func TestList(t *testing.T) {
 	})
 }
 
+func TestListCurrent(t *testing.T) {
+	t.Parallel()
+
+	want := &model.ListResult{Events: []model.ChangeEvent{{ID: "active"}}, TotalCount: 1}
+	var captured model.CurrentParams
+	storeErr := errors.New("current query failed")
+
+	t.Run("normalizes limit and delegates", func(t *testing.T) {
+		t.Parallel()
+
+		ms := &mockStore{
+			listCurrentFn: func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
+				captured = params
+				return want, nil
+			},
+		}
+		svc := service.NewChangeService(ms)
+		result, err := svc.ListCurrent(t.Context(), model.CurrentParams{
+			ForTeam:    "payments",
+			Scopes:     []string{"site"},
+			Severities: []string{"sev0", "sev1"},
+			EventType:  "deployment",
+			Offset:     10,
+		})
+		if err != nil {
+			t.Fatalf("ListCurrent() error = %v", err)
+		}
+		if result != want {
+			t.Errorf("ListCurrent() result = %p, want %p", result, want)
+		}
+		if captured.Limit != model.DefaultLimit {
+			t.Errorf("Limit = %d, want %d", captured.Limit, model.DefaultLimit)
+		}
+		if captured.ForTeam != "payments" || captured.EventType != "deployment" || captured.Offset != 10 {
+			t.Errorf("captured params = %+v", captured)
+		}
+		if fmt.Sprint(captured.Scopes) != "[site]" || fmt.Sprint(captured.Severities) != "[sev0 sev1]" {
+			t.Errorf("captured slice params = %+v", captured)
+		}
+	})
+
+	t.Run("propagates store error", func(t *testing.T) {
+		t.Parallel()
+
+		ms := &mockStore{
+			listCurrentFn: func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+				return nil, storeErr
+			},
+		}
+		svc := service.NewChangeService(ms)
+		_, err := svc.ListCurrent(t.Context(), model.CurrentParams{Limit: model.MaxLimit + 1})
+		if !errors.Is(err, storeErr) {
+			t.Errorf("ListCurrent() error = %v, want %v", err, storeErr)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // ToggleStar tests
 // ---------------------------------------------------------------------------
@@ -540,6 +875,33 @@ func TestToggleStar(t *testing.T) {
 			t.Fatalf("got error %v, want %v", err, storeErr)
 		}
 	})
+}
+
+func TestToggleAlert(t *testing.T) {
+	t.Parallel()
+
+	want := &model.ChangeEvent{ID: "alert-1", ParentID: "evt-1", EventType: model.EventTypeAlert}
+	ms := &mockStore{toggleAlertFn: func(_ context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+		if eventID != "evt-1" || userName != "bob" {
+			t.Errorf("ToggleAlert(%q, %q)", eventID, userName)
+		}
+		return want, nil
+	}}
+	got, err := service.NewChangeService(ms).ToggleAlert(t.Context(), "evt-1", "bob")
+	if err != nil {
+		t.Fatalf("ToggleAlert() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("ToggleAlert() = %p, want %p", got, want)
+	}
+
+	ms.toggleAlertFn = func(_ context.Context, _, _ string) (*model.ChangeEvent, error) {
+		return nil, store.ErrNotFound
+	}
+	_, err = service.NewChangeService(ms).ToggleAlert(t.Context(), "missing", "bob")
+	if !errors.Is(err, service.ErrEventNotFound) {
+		t.Fatalf("ToggleAlert(missing) error = %v, want %v", err, service.ErrEventNotFound)
+	}
 }
 
 // ---------------------------------------------------------------------------

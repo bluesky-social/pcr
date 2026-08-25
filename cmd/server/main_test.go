@@ -2,20 +2,15 @@ package main
 
 import (
 	"bufio"
-	"database/sql"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 type oneConnListener struct {
@@ -122,90 +117,4 @@ func TestServeUntilShutdownWaitsForActiveRequest(t *testing.T) {
 	if err := <-serveDone; err != nil {
 		t.Fatalf("serveUntilShutdown() error = %v", err)
 	}
-}
-
-func TestRunMigrationsRefusesDirtyDatabase(t *testing.T) {
-	t.Parallel()
-
-	db := openMigrationTestDB(t)
-	ctx := t.Context()
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE schema_migrations (version uint64, dirty bool);
-		INSERT INTO schema_migrations (version, dirty) VALUES (1, 1);
-	`); err != nil {
-		t.Fatalf("seed dirty migration state: %v", err)
-	}
-
-	err := runMigrations(db)
-	if err == nil {
-		t.Fatal("runMigrations() error = nil, want dirty-migration error")
-	}
-	if !strings.Contains(err.Error(), "dirty at version 1") {
-		t.Fatalf("runMigrations() error = %q, want dirty version context", err)
-	}
-
-	var version int
-	var dirty bool
-	if err := db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
-		t.Fatalf("read migration state: %v", err)
-	}
-	if version != 1 || !dirty {
-		t.Errorf("migration state = (version=%d, dirty=%t), want (version=1, dirty=true)", version, dirty)
-	}
-}
-
-func TestRunMigrationsCreatesFreshSchema(t *testing.T) {
-	t.Parallel()
-
-	db := openMigrationTestDB(t)
-	ctx := t.Context()
-	if err := runMigrations(db); err != nil {
-		t.Fatalf("runMigrations() error = %v", err)
-	}
-
-	var externalIDColumns int
-	if err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM pragma_table_info('change_events') WHERE name = 'external_id'
-	`).Scan(&externalIDColumns); err != nil {
-		t.Fatalf("inspect change_events schema: %v", err)
-	}
-	if externalIDColumns != 1 {
-		t.Errorf("external_id column count = %d, want 1", externalIDColumns)
-	}
-
-	var externalIDIndexes int
-	if err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM sqlite_master
-		WHERE type = 'index' AND name = 'idx_change_events_external_id'
-	`).Scan(&externalIDIndexes); err != nil {
-		t.Fatalf("inspect external_id index: %v", err)
-	}
-	if externalIDIndexes != 1 {
-		t.Errorf("external_id index count = %d, want 1", externalIDIndexes)
-	}
-
-	var version int
-	var dirty bool
-	if err := db.QueryRowContext(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
-		t.Fatalf("read migration state: %v", err)
-	}
-	if version != 1 || dirty {
-		t.Errorf("migration state = (version=%d, dirty=%t), want (version=1, dirty=false)", version, dirty)
-	}
-}
-
-func openMigrationTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-
-	dbPath := filepath.Join(t.TempDir(), "migration.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
-	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("db.Close() error = %v", err)
-		}
-	})
-	return db
 }

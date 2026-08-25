@@ -24,9 +24,11 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Use(chimiddleware.Recoverer)
 	r.Use(chimiddleware.Timeout(30 * time.Second))
 
-	// Static files and health check are served without authentication.
+	// Static files and health checks are served without authentication.
 	staticFS := http.FileServerFS(web.StaticFS)
 	r.Handle("/static/*", staticFS)
+	r.Get("/livez", apiHandler.Liveness)
+	r.Get("/readyz", apiHandler.Readiness)
 	r.Get("/api/v1/health", apiHandler.HealthCheck)
 	r.Get("/login", loginHandler.ShowLoginForm)
 	r.Post("/login", loginHandler.Login)
@@ -37,11 +39,16 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(cfg.APITokens, cfg.RequireAuthReads, nil))
 
+		r.Get("/api/v1/current", apiHandler.ListCurrent)
 		r.Get("/api/v1/events", apiHandler.ListEvents)
 		r.Post("/api/v1/events", apiHandler.CreateEvent)
 		r.Get("/api/v1/events/{id}", apiHandler.GetEvent)
 		r.Get("/api/v1/events/{id}/annotations", apiHandler.GetEventAnnotations)
+		r.Get("/api/v1/events/{id}/activity", apiHandler.GetEventActivity)
+		r.Post("/api/v1/events/{id}/links", apiHandler.AddEventLinks)
 		r.Post("/api/v1/events/{id}/star", apiHandler.ToggleStar)
+		r.Post("/api/v1/events/{id}/alert", apiHandler.ToggleAlert)
+		r.Post("/api/v1/events/{id}/close", apiHandler.CloseOperation)
 	})
 
 	// Dashboard routes accept browser sessions as well as explicit tokens.
@@ -51,6 +58,9 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 		r.Get("/", dashHandler.Dashboard)
 		r.Get("/events/{id}", dashHandler.Detail)
 		r.Post("/events/{id}/star", dashHandler.ToggleStar)
+		r.Post("/events/{id}/alert", dashHandler.ToggleAlert)
+		r.Post("/events/{id}/links", dashHandler.AddLinks)
+		r.Post("/events/{id}/close", dashHandler.CloseOperation)
 	})
 
 	return r

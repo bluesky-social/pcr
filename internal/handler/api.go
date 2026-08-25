@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -15,7 +16,7 @@ import (
 
 // Pinger tests database connectivity.
 type Pinger interface {
-	PingContext(ctx context.Context) error
+	Ping(ctx context.Context) error
 }
 
 // APIHandler serves the REST/JSON API.
@@ -29,10 +30,16 @@ func NewAPIHandler(svc *service.ChangeService, db Pinger) *APIHandler {
 	return &APIHandler{svc: svc, db: db}
 }
 
-// HealthCheck verifies that the service is running and the database is reachable.
-func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	if err := h.db.PingContext(r.Context()); err != nil {
-		slog.ErrorContext(r.Context(), "health check failed: database unreachable", "error", err)
+// Liveness reports whether the HTTP process can serve requests. It deliberately
+// avoids dependencies so an external outage does not trigger restart loops.
+func (h *APIHandler) Liveness(w http.ResponseWriter, r *http.Request) {
+	writeJSON(r.Context(), w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Readiness reports whether the service can reach PostgreSQL and accept traffic.
+func (h *APIHandler) Readiness(w http.ResponseWriter, r *http.Request) {
+	if err := h.db.Ping(r.Context()); err != nil {
+		slog.ErrorContext(r.Context(), "readiness check failed: database unreachable", "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if encErr := json.NewEncoder(w).Encode(map[string]string{
@@ -45,6 +52,11 @@ func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(r.Context(), w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HealthCheck preserves the original database-aware health endpoint.
+func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	h.Readiness(w, r)
 }
 
 func (h *APIHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +116,28 @@ func (h *APIHandler) GetEventAnnotations(w http.ResponseWriter, r *http.Request)
 	writeJSON(ctx, w, http.StatusOK, annotations)
 }
 
+func (h *APIHandler) GetEventActivity(w http.ResponseWriter, r *http.Request) {
+	activity, err := h.svc.GetActivity(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		mapServiceError(r.Context(), w, err)
+		return
+	}
+	writeJSON(r.Context(), w, http.StatusOK, activity)
+}
+
+func (h *APIHandler) AddEventLinks(w http.ResponseWriter, r *http.Request) {
+	var req model.AddLinksRequest
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	event, err := h.svc.AddLinks(r.Context(), chi.URLParam(r, "id"), req.UserName, req.Links)
+	if err != nil {
+		mapServiceError(r.Context(), w, err)
+		return
+	}
+	writeJSON(r.Context(), w, http.StatusCreated, event)
+}
+
 func (h *APIHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -116,6 +150,25 @@ func (h *APIHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	result, err := h.svc.List(ctx, params)
 	if err != nil {
 		slog.ErrorContext(ctx, "list events error", "error", err)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+		return
+	}
+
+	writeJSON(ctx, w, http.StatusOK, result)
+}
+
+// ListCurrent returns active logical operations derived from start and end phase events.
+func (h *APIHandler) ListCurrent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	params, paramErr := parseCurrentParams(r.URL.Query())
+	if paramErr != nil {
+		writeError(ctx, w, http.StatusBadRequest, paramErr.code, paramErr.message)
+		return
+	}
+
+	result, err := h.svc.ListCurrent(ctx, params)
+	if err != nil {
+		slog.ErrorContext(ctx, "list current events error", "error", err)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return
 	}
@@ -139,6 +192,28 @@ func (h *APIHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 	writeJSON(ctx, w, http.StatusCreated, metaEvent)
 }
 
+func (h *APIHandler) ToggleAlert(w http.ResponseWriter, r *http.Request) {
+	metaEvent, err := h.svc.ToggleAlert(r.Context(), chi.URLParam(r, "id"), "api")
+	if err != nil {
+		mapServiceError(r.Context(), w, err)
+		return
+	}
+	writeJSON(r.Context(), w, http.StatusCreated, metaEvent)
+}
+
+func (h *APIHandler) CloseOperation(w http.ResponseWriter, r *http.Request) {
+	var req model.CloseOperationRequest
+	if !decodeJSONRequest(w, r, &req) {
+		return
+	}
+	event, err := h.svc.CloseOperation(r.Context(), chi.URLParam(r, "id"), req.UserName, req.Description)
+	if err != nil {
+		mapServiceError(r.Context(), w, err)
+		return
+	}
+	writeJSON(r.Context(), w, http.StatusCreated, event)
+}
+
 // mapServiceError maps service-layer errors to HTTP responses.
 func mapServiceError(ctx context.Context, w http.ResponseWriter, err error) {
 	switch {
@@ -146,14 +221,42 @@ func mapServiceError(ctx context.Context, w http.ResponseWriter, err error) {
 		writeError(ctx, w, http.StatusBadRequest, "validation_error", "user_name is required")
 	case errors.Is(err, service.ErrEventTypeRequired):
 		writeError(ctx, w, http.StatusBadRequest, "validation_error", "event_type is required")
+	case errors.Is(err, service.ErrInvalidLink):
+		writeError(ctx, w, http.StatusBadRequest, "validation_error", err.Error())
+	case errors.Is(err, service.ErrLinksRequired):
+		writeError(ctx, w, http.StatusBadRequest, "validation_error", err.Error())
 	case errors.Is(err, service.ErrEventNotFound):
 		writeError(ctx, w, http.StatusNotFound, "not_found", "event not found")
 	case errors.Is(err, service.ErrParentNotFound):
 		writeError(ctx, w, http.StatusBadRequest, "validation_error", "parent event not found")
+	case errors.Is(err, service.ErrOperationNotClosable):
+		writeError(ctx, w, http.StatusBadRequest, "validation_error", err.Error())
+	case errors.Is(err, service.ErrOperationClosed):
+		writeError(ctx, w, http.StatusConflict, "operation_closed", err.Error())
 	default:
 		slog.ErrorContext(ctx, "internal error", "error", err)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 	}
+}
+
+func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	defer func() { _ = r.Body.Close() }()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeError(r.Context(), w, http.StatusRequestEntityTooLarge, "body_too_large", "request body exceeds 1MB limit")
+			return false
+		}
+		writeError(r.Context(), w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeError(r.Context(), w, http.StatusBadRequest, "invalid_body", "request body must contain one JSON value")
+		return false
+	}
+	return true
 }
 
 // writeJSON encodes data as a JSON response. If encoding fails after the

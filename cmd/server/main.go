@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,19 +12,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	sqlitedriver "github.com/golang-migrate/migrate/v4/database/sqlite"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
-
 	"github.com/sarah/go-prod-change-registry/internal/config"
 	"github.com/sarah/go-prod-change-registry/internal/handler"
 	"github.com/sarah/go-prod-change-registry/internal/middleware"
+	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
 	"github.com/sarah/go-prod-change-registry/internal/router"
 	"github.com/sarah/go-prod-change-registry/internal/service"
-	sqlitestore "github.com/sarah/go-prod-change-registry/internal/store/sqlite"
-	"github.com/sarah/go-prod-change-registry/migrations"
-
-	_ "modernc.org/sqlite"
+	postgresstore "github.com/sarah/go-prod-change-registry/internal/store/postgres"
 )
 
 func main() {
@@ -44,40 +37,33 @@ func main() {
 }
 
 // run wires dependencies, starts the server, and blocks until shutdown or
-// fatal error. Returning an error (instead of calling os.Exit) lets deferred
-// resource cleanup -- most importantly db.Close -- complete before exit.
+// fatal error. Returning an error lets deferred resource cleanup complete
+// before main exits the process.
 func run(cfg *config.Config) error {
-	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(%d)&_txlock=immediate",
-		cfg.DatabasePath,
-		cfg.DBBusyTimeout.Milliseconds(),
-	)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer func() {
-		if cerr := db.Close(); cerr != nil {
-			slog.Error("database close error", "error", cerr)
-		}
-	}()
-
-	slog.Info(
-		"sqlite database opened",
-		"path", cfg.DatabasePath,
-		"busy_timeout_ms", cfg.DBBusyTimeout.Milliseconds(),
-		"slow_query_threshold", cfg.DBSlowQueryThreshold,
-	)
-
 	if cfg.AutoMigrate {
-		if err := runMigrations(db); err != nil {
+		if err := postgresdb.Migrate(cfg.DatabaseURL, cfg.DBConnectTimeout); err != nil {
 			return fmt.Errorf("run migrations: %w", err)
 		}
 	}
 
-	store := sqlitestore.New(db, cfg.DBSlowQueryThreshold)
+	pool, err := postgresdb.Open(context.Background(), cfg.DatabaseURL, postgresdb.PoolOptions{
+		MaxConnections: cfg.DBMaxConnections,
+		ConnectTimeout: cfg.DBConnectTimeout,
+	})
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	slog.Info(
+		"PostgreSQL connection pool opened",
+		"max_connections", cfg.DBMaxConnections,
+		"slow_query_threshold", cfg.DBSlowQueryThreshold,
+	)
+
+	store := postgresstore.New(pool, cfg.DBSlowQueryThreshold)
 	svc := service.NewChangeService(store)
-	apiHandler := handler.NewAPIHandler(svc, db)
+	apiHandler := handler.NewAPIHandler(svc, pool)
 	dashHandler := handler.NewDashboardHandler(svc, cfg.DashboardRefreshSec, cfg.SessionSecret)
 	loginHandler := handler.NewLoginHandler(cfg.APITokens, middleware.SessionOptions{
 		Secret: cfg.SessionSecret,
@@ -146,44 +132,5 @@ func serveUntilShutdown(
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return fmt.Errorf("server exited with error: %w", serveErr)
 	}
-	return nil
-}
-
-// runMigrations applies database migrations from the embedded filesystem.
-func runMigrations(db *sql.DB) error {
-	sourceDriver, err := iofs.New(migrations.FS, ".")
-	if err != nil {
-		return err
-	}
-
-	dbDriver, err := sqlitedriver.WithInstance(db, &sqlitedriver.Config{})
-	if err != nil {
-		return err
-	}
-
-	m, err := migrate.NewWithInstance(
-		"iofs",
-		sourceDriver,
-		"sqlite",
-		dbDriver,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Handle dirty state from a previously failed migration.
-	version, dirty, verr := m.Version()
-	if verr != nil && !errors.Is(verr, migrate.ErrNoChange) && !errors.Is(verr, migrate.ErrNilVersion) {
-		return fmt.Errorf("read migration version: %w", verr)
-	}
-	if dirty {
-		return fmt.Errorf("database migration is dirty at version %d; refusing to continue until it is repaired", version)
-	}
-
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("apply migrations: %w", err)
-	}
-
-	slog.Info("database migrations applied successfully")
 	return nil
 }

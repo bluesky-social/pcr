@@ -22,8 +22,10 @@ import (
 type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
 	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
+	toggleAlertFn         func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
+	listCurrentFn         func(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
 	getAnnotationsBatchFn func(ctx context.Context, eventIDs []string) (map[string]*model.EventAnnotations, error)
 }
@@ -45,6 +47,13 @@ func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*
 	panic("unexpected call to ToggleStar")
 }
 
+func (m *mockStore) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	if m.toggleAlertFn != nil {
+		return m.toggleAlertFn(ctx, eventID, userName)
+	}
+	panic("unexpected call to ToggleAlert")
+}
+
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
 	if m.getByIDFn != nil {
 		return m.getByIDFn(ctx, id)
@@ -57,6 +66,13 @@ func (m *mockStore) List(ctx context.Context, params model.ListParams) (*model.L
 		return m.listFn(ctx, params)
 	}
 	panic("unexpected call to List")
+}
+
+func (m *mockStore) ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error) {
+	if m.listCurrentFn != nil {
+		return m.listCurrentFn(ctx, params)
+	}
+	panic("unexpected call to ListCurrent")
 }
 
 func (m *mockStore) GetAnnotations(ctx context.Context, eventID string) (*model.EventAnnotations, error) {
@@ -90,7 +106,7 @@ type mockPinger struct {
 	err error
 }
 
-func (p *mockPinger) PingContext(_ context.Context) error {
+func (p *mockPinger) Ping(_ context.Context) error {
 	return p.err
 }
 
@@ -100,12 +116,19 @@ func newTestStack() *testStack {
 	h := handler.NewAPIHandler(svc, &mockPinger{})
 
 	r := chi.NewRouter()
+	r.Get("/livez", h.Liveness)
+	r.Get("/readyz", h.Readiness)
 	r.Get("/api/v1/health", h.HealthCheck)
 	r.Post("/api/v1/events", h.CreateEvent)
 	r.Get("/api/v1/events", h.ListEvents)
+	r.Get("/api/v1/current", h.ListCurrent)
 	r.Get("/api/v1/events/{id}", h.GetEvent)
 	r.Get("/api/v1/events/{id}/annotations", h.GetEventAnnotations)
+	r.Get("/api/v1/events/{id}/activity", h.GetEventActivity)
+	r.Post("/api/v1/events/{id}/links", h.AddEventLinks)
 	r.Post("/api/v1/events/{id}/star", h.ToggleStar)
+	r.Post("/api/v1/events/{id}/alert", h.ToggleAlert)
+	r.Post("/api/v1/events/{id}/close", h.CloseOperation)
 
 	return &testStack{
 		store:   ms,
@@ -115,29 +138,60 @@ func newTestStack() *testStack {
 	}
 }
 
-// ---------- HealthCheck ----------
+// ---------- Health checks ----------
 
-func TestHealthCheck(t *testing.T) {
+func TestLivenessDoesNotDependOnDatabase(t *testing.T) {
+	t.Parallel()
+
+	ms := &mockStore{}
+	svc := service.NewChangeService(ms)
+	h := handler.NewAPIHandler(svc, &mockPinger{err: errors.New("connection refused")})
+
+	r := chi.NewRouter()
+	r.Get("/livez", h.Liveness)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/livez", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /livez status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode GET /livez response: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("GET /livez status field = %q, want %q", body["status"], "ok")
+	}
+}
+
+func TestReadiness(t *testing.T) {
 	t.Parallel()
 
 	t.Run("healthy database returns 200", func(t *testing.T) {
 		t.Parallel()
 
 		ts := newTestStack()
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/health", nil)
-		rec := httptest.NewRecorder()
-		ts.router.ServeHTTP(rec, req)
+		for _, path := range []string{"/readyz", "/api/v1/health"} {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			ts.router.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", rec.Code)
-		}
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d, want %d", path, rec.Code, http.StatusOK)
+				continue
+			}
 
-		var body map[string]string
-		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-		if body["status"] != "ok" {
-			t.Fatalf("expected status ok, got %q", body["status"])
+			var body map[string]string
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Errorf("decode GET %s response: %v", path, err)
+				continue
+			}
+			if body["status"] != "ok" {
+				t.Errorf("GET %s status field = %q, want %q", path, body["status"], "ok")
+			}
 		}
 	})
 
@@ -149,22 +203,27 @@ func TestHealthCheck(t *testing.T) {
 		h := handler.NewAPIHandler(svc, &mockPinger{err: errors.New("connection refused")})
 
 		r := chi.NewRouter()
+		r.Get("/readyz", h.Readiness)
 		r.Get("/api/v1/health", h.HealthCheck)
 
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/health", nil)
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+		for _, path := range []string{"/readyz", "/api/v1/health"} {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("expected status 503, got %d", rec.Code)
-		}
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("GET %s status = %d, want %d", path, rec.Code, http.StatusServiceUnavailable)
+				continue
+			}
 
-		var body map[string]string
-		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-		if body["status"] != "unhealthy" {
-			t.Fatalf("expected status unhealthy, got %q", body["status"])
+			var body map[string]string
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Errorf("decode GET %s response: %v", path, err)
+				continue
+			}
+			if body["status"] != "unhealthy" {
+				t.Errorf("GET %s status field = %q, want %q", path, body["status"], "unhealthy")
+			}
 		}
 	})
 }
@@ -173,6 +232,45 @@ func TestHealthCheck(t *testing.T) {
 
 func TestCreateEvent(t *testing.T) {
 	t.Parallel()
+
+	t.Run("accepts ordered external links", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			if len(event.Links) != 2 || event.Links[0].Label != "PagerDuty" || event.Links[1].URL != "https://github.com/example/repo/pull/9" {
+				t.Errorf("stored links = %#v", event.Links)
+			}
+			return event, nil
+		}
+		payload := `{"user_name":"alice","event_type":"incident","links":[{"label":"PagerDuty","url":"https://example.pagerduty.com/incidents/P9"},{"label":"PR","url":"https://github.com/example/repo/pull/9"}]}`
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", bytes.NewBufferString(payload))
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var event model.ChangeEvent
+		if err := json.NewDecoder(rec.Body).Decode(&event); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if len(event.Links) != 2 || event.Links[0].URL != "https://example.pagerduty.com/incidents/P9" {
+			t.Errorf("response links = %#v", event.Links)
+		}
+	})
+
+	t.Run("rejects non-HTTP link URLs", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		payload := `{"user_name":"alice","event_type":"incident","links":[{"label":"unsafe","url":"javascript:alert(1)"}]}`
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", bytes.NewBufferString(payload))
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "absolute http or https") {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
 
 	t.Run("valid request returns 201 with Location header", func(t *testing.T) {
 		t.Parallel()
@@ -806,6 +904,168 @@ func TestToggleStar(t *testing.T) {
 		}
 		if errObj["code"] != "not_found" {
 			t.Fatalf("expected error code not_found, got %v", errObj["code"])
+		}
+	})
+}
+
+func TestEventActionEndpoints(t *testing.T) {
+	t.Parallel()
+
+	t.Run("append links", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "event-1"}, nil
+		}
+		ts.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			return event, nil
+		}
+		body := `{"user_name":"alice","links":[{"label":"Plan","url":"https://notion.so/example/plan"},{"label":"PR","url":"https://github.com/example/repo/pull/1"}]}`
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/event-1/links", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var event model.ChangeEvent
+		if err := json.NewDecoder(rec.Body).Decode(&event); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if event.ParentID != "event-1" || event.EventType != model.EventTypeLink || len(event.Links) != 2 {
+			t.Errorf("link annotation = %+v", event)
+		}
+	})
+
+	t.Run("list activity", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "event-1"}, nil
+		}
+		ts.store.listFn = func(_ context.Context, params model.ListParams) (*model.ListResult, error) {
+			return &model.ListResult{Events: []model.ChangeEvent{{ID: "link-1", ParentID: params.ParentID}}}, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/events/event-1/activity", nil)
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"link-1"`) {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("toggle alert", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.toggleAlertFn = func(_ context.Context, eventID, _ string) (*model.ChangeEvent, error) {
+			return &model.ChangeEvent{ID: "alert-1", ParentID: eventID, EventType: model.EventTypeAlert}, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/event-1/alert", nil)
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"event_type":"alert"`) {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("close operation", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		start := &model.ChangeEvent{ID: "start-1", EventType: "deployment", Tags: map[string]string{"phase": "start", "change_id": "change-1"}}
+		ts.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) { return start, nil }
+		ts.store.listCurrentFn = func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+			return &model.ListResult{TotalCount: 1}, nil
+		}
+		ts.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) { return event, nil }
+		body := `{"user_name":"alice","description":"rollout complete"}`
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events/start-1/close", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"phase":"end"`) {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// ---------- ListCurrent ----------
+
+func TestListCurrent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns current events and forwards filters", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		var captured model.CurrentParams
+		ts.store.listCurrentFn = func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
+			captured = params
+			return &model.ListResult{
+				Events: []model.ChangeEvent{{
+					ID:        "active-event",
+					EventType: "deployment",
+					Tags:      map[string]string{"phase": "start", "change_id": "change-1"},
+				}},
+				TotalCount: 1,
+				Limit:      25,
+				Offset:     5,
+			}, nil
+		}
+
+		req := httptest.NewRequestWithContext(
+			t.Context(),
+			http.MethodGet,
+			"/api/v1/current?for_team=payments&scope=service&scope=site&severity=sev0&severity=sev1&type=deployment&limit=25&offset=5",
+			nil,
+		)
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		if captured.ForTeam != "payments" || captured.EventType != "deployment" || captured.Limit != 25 || captured.Offset != 5 {
+			t.Errorf("captured params = %+v", captured)
+		}
+		if len(captured.Scopes) != 2 || len(captured.Severities) != 2 {
+			t.Errorf("captured repeated params = %+v", captured)
+		}
+
+		var result model.ListResult
+		if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if result.TotalCount != 1 || len(result.Events) != 1 || result.Events[0].ID != "active-event" {
+			t.Errorf("result = %+v", result)
+		}
+	})
+
+	t.Run("rejects malformed pagination", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/current?limit=nope", nil)
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("returns 500 on service failure", func(t *testing.T) {
+		t.Parallel()
+
+		ts := newTestStack()
+		ts.store.listCurrentFn = func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
+			return nil, errors.New("database unavailable")
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/current", nil)
+		rec := httptest.NewRecorder()
+		ts.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
 		}
 	})
 }

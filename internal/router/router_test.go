@@ -22,8 +22,10 @@ import (
 type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
 	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
+	toggleAlertFn         func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
+	listCurrentFn         func(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
 	getAnnotationsFn      func(ctx context.Context, eventID string) (*model.EventAnnotations, error)
 	getAnnotationsBatchFn func(ctx context.Context, eventIDs []string) (map[string]*model.EventAnnotations, error)
 }
@@ -44,6 +46,13 @@ func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*
 	panic("unexpected call to ToggleStar")
 }
 
+func (m *mockStore) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+	if m.toggleAlertFn != nil {
+		return m.toggleAlertFn(ctx, eventID, userName)
+	}
+	panic("unexpected call to ToggleAlert")
+}
+
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {
 	if m.getByIDFn != nil {
 		return m.getByIDFn(ctx, id)
@@ -56,6 +65,13 @@ func (m *mockStore) List(ctx context.Context, params model.ListParams) (*model.L
 		return m.listFn(ctx, params)
 	}
 	panic("unexpected call to List")
+}
+
+func (m *mockStore) ListCurrent(ctx context.Context, params model.CurrentParams) (*model.ListResult, error) {
+	if m.listCurrentFn != nil {
+		return m.listCurrentFn(ctx, params)
+	}
+	panic("unexpected call to ListCurrent")
 }
 
 func (m *mockStore) GetAnnotations(ctx context.Context, eventID string) (*model.EventAnnotations, error) {
@@ -76,7 +92,7 @@ func (m *mockStore) Close() error { return nil }
 
 type mockPinger struct{}
 
-func (p *mockPinger) PingContext(_ context.Context) error { return nil }
+func (p *mockPinger) Ping(_ context.Context) error { return nil }
 
 const testToken = "test-secret-token"
 
@@ -87,6 +103,14 @@ func newTestRouter(t *testing.T, requireAuthReads bool) (http.Handler, *mockStor
 	now := time.Now().UTC()
 	ms := &mockStore{
 		listFn: func(_ context.Context, _ model.ListParams) (*model.ListResult, error) {
+			return &model.ListResult{
+				Events:     []model.ChangeEvent{},
+				TotalCount: 0,
+				Limit:      50,
+				Offset:     0,
+			}, nil
+		},
+		listCurrentFn: func(_ context.Context, _ model.CurrentParams) (*model.ListResult, error) {
 			return &model.ListResult{
 				Events:     []model.ChangeEvent{},
 				TotalCount: 0,
@@ -167,6 +191,11 @@ func TestAuthEnforcement(t *testing.T) {
 				path:   "/api/v1/events",
 			},
 			{
+				name:   "GET /api/v1/current without auth",
+				method: http.MethodGet,
+				path:   "/api/v1/current",
+			},
+			{
 				name:   "GET /api/v1/events/{id} without auth",
 				method: http.MethodGet,
 				path:   "/api/v1/events/some-id",
@@ -245,16 +274,18 @@ func TestAuthEnforcement(t *testing.T) {
 		}
 	})
 
-	t.Run("health endpoint is accessible without auth", func(t *testing.T) {
+	t.Run("health endpoints are accessible without auth", func(t *testing.T) {
 		t.Parallel()
 
 		r, _ := newTestRouter(t, true)
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/health", nil)
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+		for _, path := range []string{"/livez", "/readyz", "/api/v1/health"} {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 for health, got %d", rec.Code)
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d, want %d", path, rec.Code, http.StatusOK)
+			}
 		}
 	})
 
@@ -337,6 +368,26 @@ func TestAuthEnforcement(t *testing.T) {
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("current endpoint follows read authentication setting", func(t *testing.T) {
+		t.Parallel()
+
+		requiredRouter, _ := newTestRouter(t, true)
+		authenticated := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/current?token="+testToken, nil)
+		authenticatedRec := httptest.NewRecorder()
+		requiredRouter.ServeHTTP(authenticatedRec, authenticated)
+		if authenticatedRec.Code != http.StatusOK {
+			t.Errorf("authenticated status = %d, want 200", authenticatedRec.Code)
+		}
+
+		optionalRouter, _ := newTestRouter(t, false)
+		unauthenticated := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/current", nil)
+		unauthenticatedRec := httptest.NewRecorder()
+		optionalRouter.ServeHTTP(unauthenticatedRec, unauthenticated)
+		if unauthenticatedRec.Code != http.StatusOK {
+			t.Errorf("optional-auth status = %d, want 200", unauthenticatedRec.Code)
 		}
 	})
 

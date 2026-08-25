@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +52,14 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 			q.Set("tag", key+":"+value)
 			return "/?" + q.Encode()
 		},
+		"tagValue": func(tags map[string]string, key string) string {
+			return tags[key]
+		},
+		"formatElapsed": formatElapsed,
+		"dashboardViewURL": func(view, team string) string {
+			return dashboardURL(view, team, "")
+		},
+		"dashboardRangeURL": dashboardURL,
 	}
 
 	// Parse each page template separately with the shared layout
@@ -81,6 +90,8 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 
 // dashboardFilters holds the current filter values for re-populating the form.
 type dashboardFilters struct {
+	View        string
+	Team        string
 	Range       string
 	StartAfter  string
 	StartBefore string
@@ -88,6 +99,8 @@ type dashboardFilters struct {
 	UserName    string
 	Alerted     bool
 	Tags        []string
+	Scopes      []string
+	Severities  []string
 }
 
 // dashboardEvent wraps a ChangeEvent with its derived annotation state.
@@ -99,26 +112,33 @@ type dashboardEvent struct {
 
 // dashboardData is the template data for the dashboard page.
 type dashboardData struct {
-	RefreshSec  int
-	CSRFToken   string
-	Events      []dashboardEvent
-	Filters     dashboardFilters
-	TotalCount  int
-	Limit       int
-	Offset      int
-	HasPrev     bool
-	HasNext     bool
-	PrevURL     string
-	NextURL     string
-	OffsetStart int
-	OffsetEnd   int
+	RefreshSec   int
+	CSRFToken    string
+	Events       []dashboardEvent
+	BannerEvents []model.ChangeEvent
+	BannerTotal  int
+	BannerURL    string
+	Filters      dashboardFilters
+	TotalCount   int
+	Limit        int
+	Offset       int
+	HasPrev      bool
+	HasNext      bool
+	PrevURL      string
+	NextURL      string
+	OffsetStart  int
+	OffsetEnd    int
 }
 
 // detailData is the template data for the detail page.
 type detailData struct {
-	RefreshSec  int
-	Event       *model.ChangeEvent
-	Annotations *model.EventAnnotations
+	RefreshSec     int
+	CSRFToken      string
+	Event          *model.ChangeEvent
+	Annotations    *model.EventAnnotations
+	Links          []model.EventLink
+	Activity       []model.ChangeEvent
+	OperationState string
 }
 
 // quickRanges maps the quick-select range values to durations.
@@ -129,13 +149,25 @@ var quickRanges = map[string]time.Duration{
 	"24h": 24 * time.Hour,
 }
 
+const dashboardBannerLimit = 20
+
 // Dashboard handles GET / and renders the event list.
 func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	params, filters := parseDashboardRequest(r)
 
-	result, err := h.svc.List(r.Context(), params)
+	result, err := h.listDashboardEvents(r.Context(), params, filters)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "dashboard list events error", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	banner, err := h.svc.ListCurrent(r.Context(), model.CurrentParams{
+		ForTeam:    filters.Team,
+		Severities: []string{"sev0", "sev1"},
+		Limit:      dashboardBannerLimit,
+	})
+	if err != nil {
+		slog.ErrorContext(r.Context(), "dashboard list high-severity events error", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -147,31 +179,101 @@ func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offsetStart := params.Offset + 1
+	offsetStart := result.Offset + 1
 	if result.TotalCount == 0 {
 		offsetStart = 0
 	}
 
 	data := dashboardData{
-		RefreshSec:  h.refreshSec,
-		CSRFToken:   middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
-		Events:      buildDashboardEvents(result.Events, annotations),
-		Filters:     filters,
-		TotalCount:  result.TotalCount,
-		Limit:       result.Limit,
-		Offset:      result.Offset,
-		HasPrev:     params.Offset > 0,
-		HasNext:     params.Offset+params.Limit < result.TotalCount,
-		PrevURL:     h.paginationURL(r, params.Offset-params.Limit, params.Limit),
-		NextURL:     h.paginationURL(r, params.Offset+params.Limit, params.Limit),
-		OffsetStart: offsetStart,
-		OffsetEnd:   params.Offset + len(result.Events),
+		RefreshSec:   h.refreshSec,
+		CSRFToken:    middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
+		Events:       buildDashboardEvents(result.Events, annotations),
+		BannerEvents: banner.Events,
+		BannerTotal:  banner.TotalCount,
+		BannerURL:    currentSeverityURL(filters.Team, []string{"sev0", "sev1"}),
+		Filters:      filters,
+		TotalCount:   result.TotalCount,
+		Limit:        result.Limit,
+		Offset:       result.Offset,
+		HasPrev:      result.Offset > 0,
+		HasNext:      result.Offset+result.Limit < result.TotalCount,
+		PrevURL:      h.paginationURL(r, result.Offset-result.Limit, result.Limit),
+		NextURL:      h.paginationURL(r, result.Offset+result.Limit, result.Limit),
+		OffsetStart:  offsetStart,
+		OffsetEnd:    result.Offset + len(result.Events),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := h.dashboardTmpl.ExecuteTemplate(w, "layout", data); err != nil {
 		slog.ErrorContext(r.Context(), "dashboard template execute error", "error", err)
 		http.Error(w, "Template error", http.StatusInternalServerError)
+	}
+}
+
+func (h *DashboardHandler) listDashboardEvents(ctx context.Context, params model.ListParams, filters dashboardFilters) (*model.ListResult, error) {
+	switch filters.View {
+	case "current":
+		return h.svc.ListCurrent(ctx, model.CurrentParams{
+			ForTeam:    filters.Team,
+			Scopes:     filters.Scopes,
+			Severities: filters.Severities,
+			EventType:  params.EventType,
+			Limit:      params.Limit,
+			Offset:     params.Offset,
+		})
+	case "site":
+		return h.svc.ListCurrent(ctx, model.CurrentParams{
+			Scopes:     []string{"site"},
+			Severities: filters.Severities,
+			EventType:  params.EventType,
+			Limit:      params.Limit,
+			Offset:     params.Offset,
+		})
+	default:
+		return h.svc.List(ctx, params)
+	}
+}
+
+func dashboardURL(view, team, rangeValue string) string {
+	q := url.Values{}
+	q.Set("view", view)
+	if team != "" {
+		q.Set("team", team)
+	}
+	if rangeValue != "" {
+		q.Set("range", rangeValue)
+	}
+	return "/?" + q.Encode()
+}
+
+func currentSeverityURL(team string, severities []string) string {
+	q := url.Values{"view": {"current"}}
+	if team != "" {
+		q.Set("team", team)
+	}
+	for _, severity := range severities {
+		q.Add("severity", severity)
+	}
+	return "/?" + q.Encode()
+}
+
+func formatElapsed(timestamp time.Time) string {
+	duration := time.Since(timestamp)
+	if duration < time.Minute {
+		return "<1m"
+	}
+
+	duration = duration.Truncate(time.Minute)
+	days := int(duration / (24 * time.Hour))
+	hours := int(duration % (24 * time.Hour) / time.Hour)
+	minutes := int(duration % time.Hour / time.Minute)
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd %dh", days, hours)
+	case hours > 0:
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	default:
+		return fmt.Sprintf("%dm", minutes)
 	}
 }
 
@@ -226,11 +328,31 @@ func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	activity, err := h.svc.GetActivity(r.Context(), id)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "detail get activity error", "error", err, "event_id", id)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	operationState, err := h.svc.OperationState(r.Context(), event)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "detail get operation state error", "error", err, "event_id", id)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	links := slices.Clone(event.Links)
+	for _, annotation := range activity {
+		links = append(links, annotation.Links...)
+	}
 
 	data := detailData{
-		RefreshSec:  0,
-		Event:       event,
-		Annotations: annotations,
+		RefreshSec:     0,
+		CSRFToken:      middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
+		Event:          event,
+		Annotations:    annotations,
+		Links:          links,
+		Activity:       activity,
+		OperationState: operationState,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -242,16 +364,7 @@ func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
 
 // ToggleStar handles POST /events/{id}/star -- posts a meta-event and redirects back.
 func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
-	if !parseBoundedPostForm(w, r) {
-		return
-	}
-
-	// Validate CSRF token from form submission. Body already bounded and
-	// parsed by parseBoundedPostForm above.
-	nonce := middleware.SessionNonce(r)
-	csrfToken := r.PostFormValue("csrf_token")
-	if !middleware.ValidateCSRFToken(h.sessionSecret, nonce, csrfToken) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+	if !h.validateActionForm(w, r) {
 		return
 	}
 
@@ -268,6 +381,80 @@ func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	redirectAfterAction(w, r)
+}
+
+// ToggleAlert appends an alert or clear-alert transition and redirects back.
+func (h *DashboardHandler) ToggleAlert(w http.ResponseWriter, r *http.Request) {
+	if !h.validateActionForm(w, r) {
+		return
+	}
+	_, err := h.svc.ToggleAlert(r.Context(), chi.URLParam(r, "id"), "dashboard-user")
+	if err != nil {
+		h.writeActionError(w, r, err, "toggle alert")
+		return
+	}
+	redirectAfterAction(w, r)
+}
+
+// AddLinks appends one link annotation containing all submitted link rows.
+func (h *DashboardHandler) AddLinks(w http.ResponseWriter, r *http.Request) {
+	if !h.validateActionForm(w, r) {
+		return
+	}
+	links := parseLinkForm(r.PostForm)
+	_, err := h.svc.AddLinks(r.Context(), chi.URLParam(r, "id"), "dashboard-user", links)
+	if err != nil {
+		h.writeActionError(w, r, err, "add links")
+		return
+	}
+	redirectAfterAction(w, r)
+}
+
+// CloseOperation appends a correlated end event and redirects back.
+func (h *DashboardHandler) CloseOperation(w http.ResponseWriter, r *http.Request) {
+	if !h.validateActionForm(w, r) {
+		return
+	}
+	_, err := h.svc.CloseOperation(
+		r.Context(),
+		chi.URLParam(r, "id"),
+		"dashboard-user",
+		r.PostFormValue("description"),
+	)
+	if err != nil {
+		h.writeActionError(w, r, err, "close operation")
+		return
+	}
+	redirectAfterAction(w, r)
+}
+
+func (h *DashboardHandler) validateActionForm(w http.ResponseWriter, r *http.Request) bool {
+	if !parseBoundedPostForm(w, r) {
+		return false
+	}
+	if !middleware.ValidateCSRFToken(h.sessionSecret, middleware.SessionNonce(r), r.PostFormValue("csrf_token")) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func (h *DashboardHandler) writeActionError(w http.ResponseWriter, r *http.Request, err error, action string) {
+	switch {
+	case errors.Is(err, service.ErrEventNotFound):
+		http.Error(w, "Event not found", http.StatusNotFound)
+	case errors.Is(err, service.ErrLinksRequired), errors.Is(err, service.ErrInvalidLink), errors.Is(err, service.ErrOperationNotClosable):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, service.ErrOperationClosed):
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		slog.ErrorContext(r.Context(), "dashboard action error", "action", action, "error", err, "event_id", chi.URLParam(r, "id"))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+func redirectAfterAction(w http.ResponseWriter, r *http.Request) {
 	// localRedirectTarget rejects scheme-relative and backslash-based paths,
 	// including percent-encoded variants after url.Parse decodes them.
 	redirect := localRedirectTarget(r.Header.Get("Referer"))

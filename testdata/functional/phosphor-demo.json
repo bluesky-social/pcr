@@ -1,0 +1,192 @@
+{
+  "events": [
+    {
+      "ref": "history_release",
+      "external_id": "demo-history-release",
+      "user_name": "maya.chen",
+      "timestamp_offset": "-2h",
+      "event_type": "feature-flag",
+      "description": "Checkout risk model advanced to cohort 40%",
+      "long_description": "Payments enabled the next risk-model cohort after a clean canary window.",
+	  "links": [
+		{"label": "Rollout PR", "url": "https://github.com/example/checkout/pull/482"},
+		{"label": "PagerDuty incident", "url": "https://example.pagerduty.com/incidents/PDEMO"}
+	  ],
+      "tags": {
+        "team": "payments",
+        "scope": "service",
+        "severity": "sev3",
+        "service": "checkout-api"
+      }
+    },
+    {
+      "ref": "history_release_star",
+      "parent_ref": "history_release",
+      "external_id": "demo-history-release-star",
+      "user_name": "release-bot",
+      "timestamp_offset": "-1h59m",
+      "event_type": "star",
+      "description": "starred"
+    },
+    {
+      "ref": "history_release_alert",
+      "parent_ref": "history_release",
+      "external_id": "demo-history-release-alert",
+      "user_name": "on-call",
+      "timestamp_offset": "-1h57m",
+      "event_type": "alert",
+      "description": "Watch conversion and decline telemetry"
+    },
+    {
+      "ref": "payments_active_old",
+      "external_id": "demo-payments-active-old-start",
+      "user_name": "deploy-bot",
+      "timestamp_offset": "-336h",
+      "event_type": "deployment",
+      "description": "Ledger reconciliation backfill",
+      "long_description": "Long-running production backfill across historical ledger partitions.",
+      "tags": {
+        "change_id": "ledger-backfill-2026-08",
+        "phase": "start",
+        "team": "payments",
+        "scope": "service",
+        "severity": "sev2",
+        "service": "ledger-worker"
+      }
+    },
+    {
+      "ref": "payments_active_sev1",
+      "external_id": "demo-payments-sev1-start",
+      "user_name": "nora.singh",
+      "timestamp_offset": "-1h30m",
+      "event_type": "maintenance",
+      "description": "Primary card vault key rotation",
+      "long_description": "Coordinated KMS rotation with live decrypt verification across all payment regions.",
+      "tags": {
+        "change_id": "vault-key-rotation-0824",
+        "phase": "start",
+        "team": "payments",
+        "scope": "system",
+        "severity": "sev1",
+        "service": "card-vault"
+      }
+    },
+    {
+      "ref": "payments_active_sev1_duplicate",
+      "external_id": "demo-payments-sev1-start-redelivery",
+      "user_name": "nora.singh",
+      "timestamp_offset": "-1h29m",
+      "event_type": "maintenance",
+      "description": "Primary card vault key rotation (redelivery)",
+      "tags": {
+        "change_id": "vault-key-rotation-0824",
+        "phase": "start",
+        "team": "payments",
+        "scope": "system",
+        "severity": "sev1"
+      }
+    },
+    {
+      "ref": "payments_active_sev1_links",
+      "parent_ref": "payments_active_sev1",
+      "external_id": "demo-payments-sev1-links",
+      "user_name": "nora.singh",
+      "timestamp_offset": "-1h28m",
+      "event_type": "link",
+      "description": "added external links",
+      "links": [
+        {"label": "Key rotation runbook", "url": "https://notion.so/example/key-rotation-runbook"},
+        {"label": "Change plan PR", "url": "https://github.com/example/card-vault/pull/71"}
+      ]
+    },
+    {
+      "ref": "payments_completed_start",
+      "external_id": "demo-payments-completed-start",
+      "user_name": "deploy-bot",
+      "timestamp_offset": "-3h",
+      "event_type": "deployment",
+      "description": "Checkout API 2026.08.24.3 rollout",
+      "tags": {
+        "deploy_id": "checkout-2026-08-24-3",
+        "phase": "start",
+        "team": "payments",
+        "scope": "service",
+        "severity": "sev2"
+      }
+    },
+    {
+      "ref": "payments_completed_end",
+      "external_id": "demo-payments-completed-end",
+      "user_name": "deploy-bot",
+      "timestamp_offset": "-2h45m",
+      "event_type": "deployment",
+      "description": "Checkout API 2026.08.24.3 rollout completed",
+      "tags": {
+        "deploy_id": "checkout-2026-08-24-3",
+        "phase": "end"
+      }
+    },
+    {
+      "ref": "site_incident",
+      "external_id": "demo-site-incident-start",
+      "user_name": "site-reliability",
+      "timestamp_offset": "-45m",
+      "event_type": "incident",
+      "description": "West coast edge traffic evacuation",
+      "long_description": "Traffic is draining from the affected edge fabric while network engineering validates path stability.",
+      "tags": {
+        "change_id": "edge-evac-0824",
+        "phase": "start",
+        "team": "platform",
+        "scope": "site",
+        "severity": "SEV0",
+        "region": "us-west"
+      }
+    },
+    {
+      "ref": "platform_service_change",
+      "external_id": "demo-platform-service-start",
+      "user_name": "platform-bot",
+      "timestamp_offset": "-1h",
+      "event_type": "k8s-change",
+      "description": "Ingress controller fleet replacement",
+      "tags": {
+        "change_id": "ingress-fleet-0824",
+        "phase": "start",
+        "team": "platform",
+        "scope": "service",
+        "severity": "sev1",
+        "cluster": "prod-us-east"
+      }
+    },
+    {
+      "ref": "unattributed_maintenance",
+      "external_id": "demo-unattributed-maintenance-start",
+      "user_name": "database-automation",
+      "timestamp_offset": "-1h15m",
+      "event_type": "maintenance",
+      "description": "Orders archive compaction",
+      "tags": {
+        "change_id": "orders-compaction-0824",
+        "phase": "start",
+        "scope": "system",
+        "severity": "sev1",
+        "database": "orders-archive"
+      }
+    },
+    {
+      "ref": "uncorrelated_start",
+      "external_id": "demo-uncorrelated-start",
+      "user_name": "legacy-hook",
+      "timestamp_offset": "-50m",
+      "event_type": "deployment",
+      "description": "Legacy event without a logical operation ID",
+      "tags": {
+        "phase": "start",
+        "team": "payments",
+        "scope": "service",
+        "severity": "sev2"
+      }
+    }
+  ]
+}

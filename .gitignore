@@ -29,11 +29,6 @@ profile.cov
 go.work
 go.work.sum
 
-# SQLite database files
-*.db
-*.db-wal
-*.db-shm
-
 # env file
 .env
 

@@ -6,9 +6,9 @@ metadata:
   labels:
     app: pcr-server
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
   selector:
     matchLabels:
       app: pcr-server
@@ -17,10 +17,23 @@ spec:
       labels:
         app: pcr-server
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: pcr-server
           image: pcr-server:latest
           imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 8080
               name: http
@@ -38,18 +51,26 @@ spec:
                 secretKeyRef:
                   name: pcr-secrets
                   key: session-secret
-          volumeMounts:
-            - name: data
-              mountPath: /data
+            - name: PCR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pcr-secrets
+                  key: database-url
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /livez
               port: http
             initialDelaySeconds: 5
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /readyz
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10
@@ -60,7 +81,3 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "500m"
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: pcr-data

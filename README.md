@@ -1,14 +1,11 @@
 # go-prod-change-registry
 
-A lightweight, append-only change registry for production environments. It records deployments, feature-flag flips, infrastructure mutations, and other production changes as immutable events in a SQLite-backed store, then exposes them through a RESTful API and an HTML dashboard. Derived annotations identify events that are currently starred or have an active alert. Teams can use it to correlate production changes with incidents and understand what changed, when, and by whom.
+A lightweight, append-only change registry for production environments. It records deployments, feature-flag flips, infrastructure mutations, and other production changes as immutable events in PostgreSQL, then exposes them through a RESTful API and an HTML dashboard. Derived annotations identify events that are currently starred or have an active alert. Teams can use it to correlate production changes with incidents and understand what changed, when, and by whom.
 
 ## Quickstart
 
 ```bash
-make build
-export PCR_API_TOKENS="my-secret-token"
-export PCR_COOKIE_SECURE=false # local HTTP only
-./bin/pcr-server
+PCR_API_TOKENS=my-secret-token docker compose up -d --build
 ```
 
 The server starts on `:8080` by default. Navigate to `http://localhost:8080/login` and enter your token to access the dashboard.
@@ -21,14 +18,15 @@ All configuration is via environment variables prefixed with `PCR_`.
 |---|---|---|---|
 | `PCR_API_TOKENS` | Yes | -- | Comma-separated list of valid API tokens |
 | `PCR_ADDR` | No | `:8080` | Listen address (`host:port`) |
-| `PCR_DATABASE_PATH` | No | `registry.db` | Path to the SQLite database file |
+| `PCR_DATABASE_URL` | Yes | -- | PostgreSQL connection URL; require TLS outside local development |
 | `PCR_REQUIRE_AUTH_READS` | No | `true` | Require auth for read endpoints (GET) |
 | `PCR_AUTO_MIGRATE` | No | `true` | Run database migrations on startup |
 | `PCR_DASHBOARD_REFRESH_SEC` | No | `60` | Dashboard auto-refresh interval in seconds |
 | `PCR_READ_TIMEOUT` | No | `5s` | HTTP server read timeout (Go duration) |
 | `PCR_WRITE_TIMEOUT` | No | `10s` | HTTP server write timeout (Go duration) |
 | `PCR_SHUTDOWN_TIMEOUT` | No | `15s` | Graceful shutdown timeout (Go duration) |
-| `PCR_DB_BUSY_TIMEOUT` | No | `5s` | SQLite busy/write-lock wait timeout |
+| `PCR_DB_CONNECT_TIMEOUT` | No | `5s` | PostgreSQL startup connection timeout |
+| `PCR_DB_MAX_CONNECTIONS` | No | `10` | Maximum PostgreSQL connections per server process |
 | `PCR_DB_SLOW_QUERY_THRESHOLD` | No | `100ms` | Log a warning when a query exceeds this |
 | `PCR_SESSION_SECRET` | No | (random) | HMAC key for dashboard session cookies. **Must be at least 32 bytes if set.** When unset, an ephemeral 32-byte secret is generated; sessions then expire on every restart. See [Production session secret](#production-session-secret) below |
 | `PCR_COOKIE_SECURE` | No | `true` | Set the `Secure` flag on session cookies (requires HTTPS). Set to `false` for local dev without TLS |
@@ -48,12 +46,19 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/health` | Health check (no auth required, verifies DB connectivity) |
+| `GET` | `/livez` | Process liveness (no auth or dependency checks) |
+| `GET` | `/readyz` | Traffic readiness (no auth, verifies PostgreSQL connectivity) |
+| `GET` | `/api/v1/health` | Backwards-compatible alias for `/readyz` |
 | `POST` | `/api/v1/events` | Create a change event or meta-event |
 | `GET` | `/api/v1/events` | List events (with filters) |
+| `GET` | `/api/v1/current` | List active logical operations derived from phase events |
 | `GET` | `/api/v1/events/{id}` | Get a single event |
 | `GET` | `/api/v1/events/{id}/annotations` | Get derived annotation state (starred, alerted) |
+| `GET` | `/api/v1/events/{id}/activity` | List annotations and lifecycle closure activity |
+| `POST` | `/api/v1/events/{id}/links` | Append one or more external-link annotations |
 | `POST` | `/api/v1/events/{id}/star` | Toggle star (creates a star or unstar meta-event) |
+| `POST` | `/api/v1/events/{id}/alert` | Toggle alert (creates an alert or clear-alert meta-event) |
+| `POST` | `/api/v1/events/{id}/close` | Close a current operation by appending a correlated end event |
 
 ### Dashboard routes
 
@@ -62,6 +67,9 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 | `GET` | `/` | Dashboard (requires session cookie or token) |
 | `GET` | `/events/{id}` | Event detail page |
 | `POST` | `/events/{id}/star` | Toggle star (redirects back, requires CSRF token) |
+| `POST` | `/events/{id}/alert` | Toggle alert state (redirects back, requires CSRF token) |
+| `POST` | `/events/{id}/links` | Append external links (redirects back, requires CSRF token) |
+| `POST` | `/events/{id}/close` | Close an open operation (redirects back, requires CSRF token) |
 | `GET` | `/login` | Show login form |
 | `POST` | `/login` | Submit token, set session cookie, redirect to dashboard |
 
@@ -81,19 +89,34 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 | `limit` | int | Max results, 1-200 (default 50) |
 | `offset` | int | Pagination offset |
 
+### Query parameters for `GET /api/v1/current`
+
+Current results have no time bound. Filters apply after start/end events have been reduced into logical active operations.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `for_team` | string | Include this team's work, unattributed work, and all `scope=site` work |
+| `scope` | string | Scope filter; repeat for OR semantics |
+| `severity` | string | Case-insensitive severity filter; repeat for OR semantics |
+| `type` | string | Exact event-type filter |
+| `limit` | int | Max results, 1-200 (default 50) |
+| `offset` | int | Pagination offset over reduced logical operations |
+
 ### Examples
 
-**Health check:**
+**Health checks:**
 
-The health endpoint does not require authentication and verifies database connectivity.
-It is suitable for use as a Kubernetes liveness/readiness probe or load balancer health check.
+Health endpoints do not require authentication. Liveness deliberately avoids PostgreSQL so a database outage does not cause a container restart loop; readiness verifies that the service can reach PostgreSQL before it receives traffic.
 
 ```bash
-# No auth needed
-curl -s http://localhost:8080/api/v1/health
+# Process is serving HTTP; always independent of PostgreSQL.
+curl -s http://localhost:8080/livez
 # Returns 200: {"status":"ok"}
 
-# When database is unreachable:
+# Service is ready to receive traffic.
+curl -s http://localhost:8080/readyz
+# Returns 200: {"status":"ok"}
+# When PostgreSQL is unreachable:
 # Returns 503: {"status":"unhealthy","reason":"database unreachable"}
 ```
 
@@ -105,6 +128,10 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "description": "Deploy payments-service v2.4.1",
   "long_description": "Rolling update across 3 regions",
+	"links": [
+	  {"label": "Pull request", "url": "https://github.com/example/payments/pull/241"},
+	  {"label": "Runbook", "url": "https://notion.so/example/payments-rollout"}
+	],
   "tags": {"service": "payments", "region": "us-east-1"}
 }'
 ```
@@ -127,6 +154,14 @@ This returns events from 30 minutes before the given timestamp (inclusive) to 30
 
 ```bash
 pcr "http://localhost:8080/api/v1/events?top_level=true"
+```
+
+**List current work visible to a team:**
+
+```bash
+pcr "http://localhost:8080/api/v1/current?for_team=payments"
+pcr "http://localhost:8080/api/v1/current?for_team=payments&severity=sev0&severity=sev1"
+pcr "http://localhost:8080/api/v1/current?scope=site"
 ```
 
 **Get a single event:**
@@ -154,6 +189,43 @@ pcr -X POST http://localhost:8080/api/v1/events/abc123/star
 ```
 
 This creates a `star` or `unstar` meta-event depending on the current state.
+
+**Append links to an existing event:**
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events/abc123/links -d '{
+  "user_name": "alice",
+  "links": [
+    {"label": "PagerDuty incident", "url": "https://example.pagerduty.com/incidents/P123"},
+    {"label": "Remediation PR", "url": "https://github.com/example/service/pull/42"}
+  ]
+}'
+```
+
+This creates one immutable `link` annotation. The detail view aggregates original links and later link annotations. Labels are limited to 256 bytes; URLs are limited to 2048 bytes and must be absolute HTTP(S) URLs without credentials or control characters. The server renders links but never fetches them.
+
+**List event activity:**
+
+```bash
+pcr http://localhost:8080/api/v1/events/abc123/activity
+```
+
+**Toggle alert:**
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events/abc123/alert
+```
+
+**Close an active operation:**
+
+```bash
+pcr -X POST http://localhost:8080/api/v1/events/abc123/close -d '{
+  "user_name": "release-manager",
+  "description": "Rollout completed and verified"
+}'
+```
+
+The server derives the event type and correlation identifier from the start event and appends an idempotent `phase=end` event.
 
 **List every currently alerted event:**
 
@@ -191,7 +263,7 @@ To unstar, another meta-event is created:
 }
 ```
 
-The current state is derived independently for each transition pair. Meta-events are considered in reverse creation order (`created_at`, then `id` as a tie-breaker): the newest `star` or `unstar` determines `starred`, and the newest `alert` or `clear-alert` determines `alerted`. An event with no transition in a pair has the corresponding state set to `false`. The meta-event's `timestamp` does not control reduction order.
+The current state is derived independently for each transition pair. Meta-events are considered in reverse database insertion order: the newest `star` or `unstar` determines `starred`, and the newest `alert` or `clear-alert` determines `alerted`. An event with no transition in a pair has the corresponding state set to `false`. Caller-supplied timestamps do not control reduction order.
 
 The `GET /api/v1/events/{id}/annotations` endpoint returns this computed state. `GET /api/v1/events?alerted=true` uses the same latest-transition rule to return events whose alert state is currently active.
 
@@ -203,8 +275,9 @@ The `GET /api/v1/events/{id}/annotations` endpoint returns this computed state. 
 | `unstar` | Removes the star from the parent event |
 | `alert` | Opens/activates the parent event's alert state |
 | `clear-alert` | Closes/clears the parent event's alert state |
+| `link` | Appends one or more external references to the parent event |
 
-For an incident-oriented event, `alert` can represent an active incident and `clear-alert` its resolution. This is the only lifecycle-like state that the application currently derives and filters. The API has a dedicated star toggle, but alert transitions are created through the generic `POST /api/v1/events` endpoint.
+For an incident-oriented event, `alert` can represent an active incident and `clear-alert` its resolution. This annotation state is independent of the phase-based logical-operation state described below. Dedicated star, alert, and link endpoints append the corresponding immutable meta-events; the generic create-event endpoint remains available to automation.
 
 ### Open and resolve an alert
 
@@ -230,9 +303,9 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 }'
 ```
 
-### Lifecycle via linked events
+### Current operations via linked phase events
 
-A deployment lifecycle (or any multi-phase operation) can be recorded as separate top-level events sharing an identifier tag rather than as a single event with start/end timestamps:
+A deployment lifecycle (or any multi-phase operation) is recorded as separate immutable top-level events sharing an identifier tag rather than as a single mutable event. Use `change_id` for new producers; `deploy_id` remains supported for existing deployment producers:
 
 ```bash
 # Deploy started
@@ -240,25 +313,37 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "user_name": "alice",
   "description": "deploy v1.2 started",
-  "tags": {"deploy_id": "abc123", "phase": "start", "env": "prod"}
+  "tags": {"change_id": "deploy-abc123", "phase": "start", "team": "payments", "scope": "service", "severity": "sev2", "env": "prod"}
 }'
 
-# Deploy completed (separate event, same deploy_id tag)
+# Deploy completed (separate event, same change_id tag)
 pcr -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "user_name": "alice",
   "description": "deploy v1.2 completed",
-  "tags": {"deploy_id": "abc123", "phase": "end", "env": "prod"}
+  "tags": {"change_id": "deploy-abc123", "phase": "end"}
 }'
 ```
 
 Query by tag to see the full lifecycle:
 
 ```bash
-pcr "http://localhost:8080/api/v1/events?tag=deploy_id:abc123"
+pcr "http://localhost:8080/api/v1/events?tag=change_id:deploy-abc123"
 ```
 
-This convention records that a start and end happened, but the application does not pair or reduce `phase=start` and `phase=end` into current state. Both appear as separate dashboard rows. Only the `alert`/`clear-alert` pair has built-in current-state calculation.
+History retains both rows. Current includes the start until a top-level end event has the same event type and correlation identifier. Exact lowercase `phase=start` and `phase=end` values participate. If both identifier tags exist, non-empty `change_id` takes precedence; an empty `change_id` falls back to non-empty `deploy_id`. Events without a usable identifier remain in History but cannot enter Current.
+
+Each logical identifier represents one start/end cycle. Duplicate starts collapse to the earliest `timestamp`, then `id`; any matching end closes the logical operation. Give a restarted operation a new logical identifier. Retries should instead reuse a stable, phase-specific `external_id`.
+
+Display and visibility tags come from the representative start event:
+
+- `team` identifies the owning team. Missing or empty values are shown as unattributed and are visible to every team.
+- `scope=site` marks site-wide work, which is visible to every team.
+- `severity` conventionally uses lowercase `sev0` through `sev3`; reads are case-insensitive for compatibility with existing `SEV0` producers.
+
+A tag key may appear at most once on an event. The database enforces this invariant. End events need only `phase`, the matching correlation identifier, and the same event type.
+
+The close endpoint and dashboard action construct that end event automatically. They accept a correlated start while its logical operation remains open and use a deterministic `external_id`, so concurrent or retried closes do not create duplicate closure events.
 
 ## Idempotency
 
@@ -312,14 +397,43 @@ Both requests return the same event (same `id`, same `created_at`). The second r
 
 The built-in HTML dashboard is served at `/`. Authenticate by navigating to `/login` and entering your API token in the form — this sets a session cookie and redirects to the dashboard. The cookie is valid for 24 hours. It provides:
 
+- A Current view for active team, unattributed, and site-wide work with no time bound
+- A Site-wide view for active `scope=site` work
+- An independent banner for visible active `sev0` and `sev1` work
 - Time range buttons to filter events by predefined windows (last 5 minutes, 30 minutes, 1 hour, and 24 hours)
 - Clickable tags that filter the event list to matching events
 - A star toggle on each event (creates star/unstar meta-events behind the scenes)
-- An Alerts filter and visual highlighting for events whose current alert state is active
-- Event detail page showing the event and its current derived star/alert state
+- Alert/clear-alert controls plus filtering and highlighting for active alerts
+- A repeatable form for appending validated external links
+- A close action for active correlated operations
+- Event detail showing lifecycle state, aggregated links, and chronological activity
 - Auto-refresh at a configurable interval (see `PCR_DASHBOARD_REFRESH_SEC`)
 
-The dashboard always requests top-level events and defaults to events timestamped within the last 24 hours. Its Alerts filter combines current alert state with the selected time range; it is not an unbounded list of all active alerts. Use the API query shown above when an unbounded result is required.
+The landing page remains the 24-hour History view. Current and Site-wide are explicit, unbounded views. Alerts combines current alert annotation state with the selected History time range; use the API query shown above when an unbounded list of alerted events is required.
+
+### Seeded interface preview
+
+The shared functional fixture contains active, completed, duplicate-delivery, site-wide, unattributed, high-severity, starred, and alerted records. Its timestamps are relative to seed time, so the 24-hour History view remains useful whenever it is run.
+
+Start a disposable server in one shell:
+
+```bash
+PCR_API_TOKENS=demo-token \
+PCR_SESSION_SECRET=demo-session-secret-with-padding-123 \
+PCR_COOKIE_SECURE=false \
+PCR_REQUIRE_AUTH_READS=false \
+PCR_DATABASE_URL='postgres://pcr@127.0.0.1/pcr?sslmode=disable' \
+PCR_ADDR=:18082 \
+go run ./cmd/server
+```
+
+Seed it from another shell, then open `http://127.0.0.1:18082/?view=current&team=payments`:
+
+```bash
+make seed-demo
+```
+
+The fixture is [testdata/functional/phosphor-demo.json](testdata/functional/phosphor-demo.json). The three interface fonts are vendored under `web/static/fonts/` and the rendered pages do not contact a remote font host.
 
 ## Data Model
 
@@ -332,28 +446,36 @@ Events are immutable. There are no update or delete operations. The core `Change
 | `parent_id` | string (optional) | References another event's ID, making this a meta-event |
 | `user_name` | string | Who made the change |
 | `timestamp` | RFC 3339 | When the change happened |
-| `event_type` | string | Category: `deployment`, `feature-flag`, `k8s-change`, or custom. Meta-events use `star`, `unstar`, `alert`, `clear-alert` |
+| `event_type` | string | Category: `deployment`, `feature-flag`, `k8s-change`, or custom. Meta-events use `star`, `unstar`, `alert`, `clear-alert`, `link` |
 | `description` | string | Short summary |
 | `long_description` | string | Detailed description |
-| `tags` | map[string]string | Arbitrary key-value metadata for filtering and lifecycle linking |
+| `links` | array of `{label, url}` | Ordered external references. Labels are optional; URLs must be absolute HTTP(S) URLs |
+| `tags` | map[string]string | Arbitrary key-value metadata for filtering and lifecycle linking; each key is unique within an event |
 | `created_at` | RFC 3339 | Record creation time |
 
-There are no mutable `timestamp_start`, `timestamp_end`, `starred`, `alerted`, or `updated_at` fields. Point-in-time lifecycle records use the single `timestamp` field and shared tags. Star and alert state are derived from meta-events. Events do not change after creation.
+There are no mutable `timestamp_start`, `timestamp_end`, `starred`, `alerted`, or `updated_at` fields. Point-in-time lifecycle records use the single `timestamp` field and shared tags. Current logical-operation state is derived from top-level phase events; star and alert state are derived independently from meta-events. Events do not change after creation.
 
 ## Architecture
 
 ```
-cmd/server/        Entry point (main)
+cmd/
+  server/          HTTP server
+  seed/            Fixture loader for a running server
+  smoke/           End-to-end HTTP smoke client
 internal/
   config/          Environment-based configuration
+  fixture/         Shared JSON fixture loading
   model/           Domain types (ChangeEvent, ListParams, request/response structs)
-  store/           SQLite data access layer (ChangeStore interface)
+  postgres/        PostgreSQL pool and migration lifecycle
+  store/           PostgreSQL data access layer (ChangeStore interface)
   service/         Business logic
   handler/         HTTP handlers (API + dashboard)
   middleware/      Auth, request ID, logging
   router/          Route definitions (chi)
 migrations/        SQL migration files
 web/               Embedded static assets and HTML templates
+testdata/           Functional fixtures
+k8s/                Example Kubernetes manifests
 docs/              Deployment and testing guides
 ```
 
@@ -363,12 +485,12 @@ Four deployment options, from simplest to most production-like:
 
 | Method | Command | Best for |
 |---|---|---|
-| **Binary** | `make build && PCR_API_TOKENS=token ./bin/pcr-server` | Local development |
+| **Binary** | `make build && PCR_API_TOKENS=token PCR_DATABASE_URL=... ./bin/pcr-server` | Local development |
 | **Docker** | `make docker-run` | Containerized local testing |
 | **Docker Compose** | `PCR_API_TOKENS=token docker compose up -d --build` | Local dev with persistence |
 | **Kubernetes (kind)** | `kind create cluster` + `kubectl apply -f k8s/` | Testing k8s deployment |
 
-See [docs/deployment.md](docs/deployment.md) for full instructions, including sanity checks for each method.
+See [docs/deployment.md](docs/deployment.md) for full container and Kubernetes instructions. For direct binary setup, see the manual setup in [docs/testing.md](docs/testing.md).
 
 ### Production session secret
 
@@ -411,10 +533,10 @@ For any deployment beyond a developer laptop, override it. Two pieces:
      docker run --rm -p 8080:8080 \
        -e PCR_API_TOKENS=... \
        -e PCR_SESSION_SECRET \
-       -v pcr-data:/data pcr-server
+       -e PCR_DATABASE_URL pcr-server
      ```
 
-   - **Kubernetes** -- store in a `Secret` and reference it from the Deployment via `envFrom` or `valueFrom.secretKeyRef`. The shipped `k8s/secret.yaml` template has placeholders for both `api-tokens` and `session-secret`; fill them with real values before `kubectl apply`. See [docs/deployment.md](docs/deployment.md) for the full Kubernetes walkthrough.
+   - **Kubernetes** -- store credentials in a `Secret` and reference them from the Deployment. The shipped `k8s/secret.yaml` template has placeholders for `api-tokens`, `session-secret`, and `database-url`; replace all three before applying it. See [docs/deployment.md](docs/deployment.md) for the full Kubernetes walkthrough.
 
    - **Other orchestrators / hosted environments** -- inject from your platform's secret manager (AWS SSM Parameter Store, GCP Secret Manager, HashiCorp Vault, GitHub Actions secrets, ...) into the container's environment.
 
@@ -446,6 +568,7 @@ Rotating the secret invalidates every existing session and CSRF token; users wil
 ### Integration tests
 
 ```bash
+export PCR_TEST_POSTGRES_URL='postgres://pcr@127.0.0.1/pcr_test?sslmode=disable'
 go test -race -tags=integration ./...
 ```
 
@@ -481,6 +604,8 @@ All responses include `Referrer-Policy: no-referrer` and `X-Content-Type-Options
 
 Tokens are configured through the `PCR_API_TOKENS` environment variable (comma-separated). The following routes do not require authentication:
 
-- `/api/v1/health` — health check
+- `/livez` — dependency-free liveness check
+- `/readyz` — PostgreSQL-backed readiness check
+- `/api/v1/health` — backwards-compatible readiness check
 - `/static/*` — CSS and static assets
 - `/login` — session login endpoint

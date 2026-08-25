@@ -16,17 +16,19 @@ const validSessionSecret = "0123456789abcdef0123456789abcdef"
 
 func TestLoad(t *testing.T) {
 	// NOT parallel — t.Setenv is incompatible with t.Parallel().
+	t.Setenv("PCR_DATABASE_URL", "postgres://pcr@postgres.example/pcr?sslmode=require")
 
 	// clearOptionalEnv blanks all optional PCR_ env vars so tests
 	// are not affected by host environment variables.
 	clearOptionalEnv := func(t *testing.T) {
 		t.Helper()
 		for _, key := range []string{
-			"PCR_ADDR", "PCR_DATABASE_PATH", "PCR_SESSION_SECRET",
+			"PCR_ADDR", "PCR_SESSION_SECRET",
 			"PCR_COOKIE_SECURE", "PCR_REQUIRE_AUTH_READS", "PCR_AUTO_MIGRATE",
 			"PCR_DASHBOARD_REFRESH_SEC", "PCR_READ_TIMEOUT",
 			"PCR_WRITE_TIMEOUT", "PCR_SHUTDOWN_TIMEOUT",
-			"PCR_DB_BUSY_TIMEOUT", "PCR_DB_SLOW_QUERY_THRESHOLD",
+			"PCR_DB_CONNECT_TIMEOUT", "PCR_DB_MAX_CONNECTIONS",
+			"PCR_DB_SLOW_QUERY_THRESHOLD",
 		} {
 			t.Setenv(key, "")
 		}
@@ -34,6 +36,7 @@ func TestLoad(t *testing.T) {
 
 	t.Run("minimum valid config uses all defaults", func(t *testing.T) {
 		t.Setenv("PCR_API_TOKENS", "tok1")
+		t.Setenv("PCR_DATABASE_URL", "postgres://pcr@postgres.example/pcr?sslmode=require")
 		clearOptionalEnv(t)
 
 		cfg, err := config.Load()
@@ -50,8 +53,8 @@ func TestLoad(t *testing.T) {
 		if cfg.Addr != ":8080" {
 			t.Errorf("Addr = %q, want %q", cfg.Addr, ":8080")
 		}
-		if cfg.DatabasePath != "registry.db" {
-			t.Errorf("DatabasePath = %q, want %q", cfg.DatabasePath, "registry.db")
+		if cfg.DatabaseURL != "postgres://pcr@postgres.example/pcr?sslmode=require" {
+			t.Errorf("DatabaseURL = %q, want configured PostgreSQL URL", cfg.DatabaseURL)
 		}
 		if cfg.CookieSecure != true {
 			t.Errorf("CookieSecure = %v, want true", cfg.CookieSecure)
@@ -74,8 +77,11 @@ func TestLoad(t *testing.T) {
 		if cfg.ShutdownTimeout != 15*time.Second {
 			t.Errorf("ShutdownTimeout = %v, want 15s", cfg.ShutdownTimeout)
 		}
-		if cfg.DBBusyTimeout != 5*time.Second {
-			t.Errorf("DBBusyTimeout = %v, want 5s", cfg.DBBusyTimeout)
+		if cfg.DBConnectTimeout != 5*time.Second {
+			t.Errorf("DBConnectTimeout = %v, want 5s", cfg.DBConnectTimeout)
+		}
+		if cfg.DBMaxConnections != 10 {
+			t.Errorf("DBMaxConnections = %d, want 10", cfg.DBMaxConnections)
 		}
 		if cfg.DBSlowQueryThreshold != 100*time.Millisecond {
 			t.Errorf("DBSlowQueryThreshold = %v, want 100ms", cfg.DBSlowQueryThreshold)
@@ -85,7 +91,7 @@ func TestLoad(t *testing.T) {
 	t.Run("full config with every env var set", func(t *testing.T) {
 		t.Setenv("PCR_API_TOKENS", "alpha, bravo, charlie")
 		t.Setenv("PCR_ADDR", ":9090")
-		t.Setenv("PCR_DATABASE_PATH", "/tmp/test.db")
+		t.Setenv("PCR_DATABASE_URL", "postgres://pcr@db.internal/pcr?sslmode=verify-full")
 		t.Setenv("PCR_SESSION_SECRET", validSessionSecret)
 		t.Setenv("PCR_REQUIRE_AUTH_READS", "false")
 		t.Setenv("PCR_AUTO_MIGRATE", "0")
@@ -93,7 +99,8 @@ func TestLoad(t *testing.T) {
 		t.Setenv("PCR_READ_TIMEOUT", "2s")
 		t.Setenv("PCR_WRITE_TIMEOUT", "20s")
 		t.Setenv("PCR_SHUTDOWN_TIMEOUT", "30s")
-		t.Setenv("PCR_DB_BUSY_TIMEOUT", "10s")
+		t.Setenv("PCR_DB_CONNECT_TIMEOUT", "10s")
+		t.Setenv("PCR_DB_MAX_CONNECTIONS", "25")
 		t.Setenv("PCR_DB_SLOW_QUERY_THRESHOLD", "250ms")
 
 		cfg, err := config.Load()
@@ -116,8 +123,8 @@ func TestLoad(t *testing.T) {
 		if cfg.Addr != ":9090" {
 			t.Errorf("Addr = %q, want %q", cfg.Addr, ":9090")
 		}
-		if cfg.DatabasePath != "/tmp/test.db" {
-			t.Errorf("DatabasePath = %q, want %q", cfg.DatabasePath, "/tmp/test.db")
+		if cfg.DatabaseURL != "postgres://pcr@db.internal/pcr?sslmode=verify-full" {
+			t.Errorf("DatabaseURL = %q, want configured PostgreSQL URL", cfg.DatabaseURL)
 		}
 		if cfg.RequireAuthReads != false {
 			t.Errorf("RequireAuthReads = %v, want false", cfg.RequireAuthReads)
@@ -137,8 +144,11 @@ func TestLoad(t *testing.T) {
 		if cfg.ShutdownTimeout != 30*time.Second {
 			t.Errorf("ShutdownTimeout = %v, want 30s", cfg.ShutdownTimeout)
 		}
-		if cfg.DBBusyTimeout != 10*time.Second {
-			t.Errorf("DBBusyTimeout = %v, want 10s", cfg.DBBusyTimeout)
+		if cfg.DBConnectTimeout != 10*time.Second {
+			t.Errorf("DBConnectTimeout = %v, want 10s", cfg.DBConnectTimeout)
+		}
+		if cfg.DBMaxConnections != 25 {
+			t.Errorf("DBMaxConnections = %d, want 25", cfg.DBMaxConnections)
 		}
 		if cfg.DBSlowQueryThreshold != 250*time.Millisecond {
 			t.Errorf("DBSlowQueryThreshold = %v, want 250ms", cfg.DBSlowQueryThreshold)
@@ -147,11 +157,26 @@ func TestLoad(t *testing.T) {
 
 	t.Run("missing PCR_API_TOKENS returns error", func(t *testing.T) {
 		t.Setenv("PCR_API_TOKENS", "")
+		t.Setenv("PCR_DATABASE_URL", "postgres://pcr@localhost/pcr")
 		clearOptionalEnv(t)
 
 		_, err := config.Load()
 		if err == nil {
 			t.Fatal("expected error when PCR_API_TOKENS is not set")
+		}
+	})
+
+	t.Run("missing PCR_DATABASE_URL returns error", func(t *testing.T) {
+		t.Setenv("PCR_API_TOKENS", "tok1")
+		t.Setenv("PCR_DATABASE_URL", "")
+		clearOptionalEnv(t)
+
+		_, err := config.Load()
+		if err == nil {
+			t.Fatal("Load() error = nil, want missing PCR_DATABASE_URL error")
+		}
+		if !strings.Contains(err.Error(), "PCR_DATABASE_URL") {
+			t.Errorf("Load() error = %q, want PCR_DATABASE_URL context", err)
 		}
 	})
 
@@ -271,7 +296,10 @@ func TestLoad(t *testing.T) {
 			{key: "PCR_READ_TIMEOUT", value: "-1s"},
 			{key: "PCR_WRITE_TIMEOUT", value: "0s"},
 			{key: "PCR_SHUTDOWN_TIMEOUT", value: "-1s"},
-			{key: "PCR_DB_BUSY_TIMEOUT", value: "0s"},
+			{key: "PCR_DB_CONNECT_TIMEOUT", value: "0s"},
+			{key: "PCR_DB_MAX_CONNECTIONS", value: "0"},
+			{key: "PCR_DB_MAX_CONNECTIONS", value: "-1"},
+			{key: "PCR_DB_MAX_CONNECTIONS", value: "2147483648"},
 			{key: "PCR_DB_SLOW_QUERY_THRESHOLD", value: "-1ms"},
 		}
 

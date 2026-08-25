@@ -39,13 +39,14 @@ func main() {
 //	2 - usage error or local server failed to start
 func run() int {
 	var (
-		baseURL    = flag.String("base-url", "", "Base URL of the server (default: http://127.0.0.1<addr> in --start-local; required otherwise)")
-		token      = flag.String("token", "smoke-token-abc", "Bearer token (must be in PCR_API_TOKENS on the target server)")
-		startLocal = flag.Bool("start-local", false, "Build and spawn a local pcr-server against an ephemeral DB; kill it on exit")
-		binary     = flag.String("binary", "./bin/pcr-server", "Path to pcr-server binary (built automatically if missing in --start-local)")
-		addr       = flag.String("addr", defaultLocalAddr, "Listen address for --start-local mode")
-		keepData   = flag.Bool("keep-data", false, "Don't delete the temp DB on exit (--start-local debug aid)")
-		verbose    = flag.Bool("v", false, "Verbose: print each HTTP request and response preview")
+		baseURL     = flag.String("base-url", "", "Base URL of the server (default: http://127.0.0.1<addr> in --start-local; required otherwise)")
+		token       = flag.String("token", "smoke-token-abc", "Bearer token (must be in PCR_API_TOKENS on the target server)")
+		startLocal  = flag.Bool("start-local", false, "Build and spawn a local pcr-server against an ephemeral DB; kill it on exit")
+		binary      = flag.String("binary", "./bin/pcr-server", "Path to pcr-server binary (built automatically if missing in --start-local)")
+		addr        = flag.String("addr", defaultLocalAddr, "Listen address for --start-local mode")
+		databaseURL = flag.String("database-url", os.Getenv("PCR_DATABASE_URL"), "PostgreSQL URL for --start-local (defaults to PCR_DATABASE_URL)")
+		keepData    = flag.Bool("keep-data", false, "Don't delete the temporary PostgreSQL schema on exit (--start-local debug aid)")
+		verbose     = flag.Bool("v", false, "Verbose: print each HTTP request and response preview")
 	)
 	flag.Parse()
 
@@ -65,7 +66,11 @@ func run() int {
 
 	var srv *localServer
 	if *startLocal {
-		srv = newLocalServer(*binary, *addr, *token, *keepData)
+		if *databaseURL == "" {
+			_, _ = fmt.Fprintln(os.Stderr, "error: --database-url or PCR_DATABASE_URL is required with --start-local")
+			return 2
+		}
+		srv = newLocalServer(*binary, *addr, *token, *databaseURL, *keepData)
 		fmt.Printf("starting local server (binary=%s, addr=%s)\n", *binary, *addr)
 		if err := srv.start(ctx); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "fatal: start local server: %v\n", err)

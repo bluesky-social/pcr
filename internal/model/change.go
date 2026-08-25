@@ -13,6 +13,13 @@ const (
 	EventTypeUnstar     = "unstar"
 	EventTypeAlert      = "alert"
 	EventTypeClearAlert = "clear-alert"
+	EventTypeLink       = "link"
+)
+
+// Derived logical-operation states.
+const (
+	OperationStateOpen   = "open"
+	OperationStateClosed = "closed"
 )
 
 // ChangeEvent represents a single production change or meta-event recorded in the registry.
@@ -27,8 +34,15 @@ type ChangeEvent struct {
 	EventType       string            `json:"event_type"`
 	Description     string            `json:"description"`
 	LongDescription string            `json:"long_description"`
+	Links           []EventLink       `json:"links,omitempty"`
 	Tags            map[string]string `json:"tags,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
+}
+
+// EventLink is an ordered external reference attached to an event.
+type EventLink struct {
+	Label string `json:"label,omitempty"`
+	URL   string `json:"url"`
 }
 
 // IsMetaEvent returns true if this event is an annotation on another event.
@@ -38,6 +52,7 @@ func (e ChangeEvent) IsMetaEvent() bool {
 
 // ListParams holds the filtering and pagination parameters for listing change events.
 type ListParams struct {
+	ParentID    string            `json:"parent_id,omitempty"`
 	StartAfter  *time.Time        `json:"start_after,omitempty"`
 	StartBefore *time.Time        `json:"start_before,omitempty"`
 	Around      *time.Time        `json:"around,omitempty"`
@@ -51,6 +66,18 @@ type ListParams struct {
 	Offset      int               `json:"offset"`
 }
 
+// CurrentParams holds filtering and pagination parameters for active logical operations.
+type CurrentParams struct {
+	ForTeam          string   `json:"for_team,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	Severities       []string `json:"severities,omitempty"`
+	EventType        string   `json:"event_type,omitempty"`
+	CorrelationKey   string   `json:"-"`
+	CorrelationValue string   `json:"-"`
+	Limit            int      `json:"limit"`
+	Offset           int      `json:"offset"`
+}
+
 // DefaultLimit is the default number of results returned by the API.
 const DefaultLimit = 50
 
@@ -62,13 +89,22 @@ const MaxLimit = 200
 
 // EffectiveLimit returns the Limit to use, clamped to [1, 200] with a default of 50.
 func (p ListParams) EffectiveLimit() int {
+	return effectiveLimit(p.Limit)
+}
+
+// EffectiveLimit returns the Limit to use, clamped to [1, 200] with a default of 50.
+func (p CurrentParams) EffectiveLimit() int {
+	return effectiveLimit(p.Limit)
+}
+
+func effectiveLimit(limit int) int {
 	switch {
-	case p.Limit <= 0:
+	case limit <= 0:
 		return DefaultLimit
-	case p.Limit > MaxLimit:
+	case limit > MaxLimit:
 		return MaxLimit
 	default:
-		return p.Limit
+		return limit
 	}
 }
 
@@ -89,7 +125,20 @@ type CreateChangeRequest struct {
 	EventType       string            `json:"event_type"`
 	Description     string            `json:"description"`
 	LongDescription string            `json:"long_description,omitempty"`
+	Links           []EventLink       `json:"links,omitempty"`
 	Tags            map[string]string `json:"tags,omitempty"`
+}
+
+// AddLinksRequest appends external references to an existing event.
+type AddLinksRequest struct {
+	UserName string      `json:"user_name"`
+	Links    []EventLink `json:"links"`
+}
+
+// CloseOperationRequest appends an end event for an active operation.
+type CloseOperationRequest struct {
+	UserName    string `json:"user_name"`
+	Description string `json:"description,omitempty"`
 }
 
 // EventAnnotations holds the derived annotation state for an event.

@@ -1,24 +1,27 @@
 //go:build integration
 
-package sqlite_test
+package postgres_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
-	"path/filepath"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	"github.com/sarah/go-prod-change-registry/internal/store"
-	"github.com/sarah/go-prod-change-registry/internal/store/sqlite"
-	"github.com/sarah/go-prod-change-registry/migrations"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
-	_ "modernc.org/sqlite"
+	"github.com/sarah/go-prod-change-registry/internal/model"
+	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
+	"github.com/sarah/go-prod-change-registry/internal/store"
+	"github.com/sarah/go-prod-change-registry/internal/store/postgres"
+	"github.com/sarah/go-prod-change-registry/migrations"
 )
 
 // ---------------------------------------------------------------------------
@@ -26,48 +29,70 @@ import (
 // ---------------------------------------------------------------------------
 
 // applyTestMigrations reads and executes the embedded migration SQL files in order.
-func applyTestMigrations(t *testing.T, db *sql.DB) {
+func applyTestMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	ctx := t.Context()
-	migrationFiles := []string{
-		"001_create_change_events.up.sql",
-	}
-	for _, name := range migrationFiles {
-		sqlBytes, err := fs.ReadFile(migrations.FS, name)
-		if err != nil {
-			t.Fatalf("read migration %s: %v", name, err)
-		}
-		if _, err := db.ExecContext(ctx, string(sqlBytes)); err != nil {
-			t.Fatalf("apply migration %s: %v", name, err)
-		}
-	}
-}
-
-func openTestDB(t *testing.T, dbPath string) *sql.DB {
-	t.Helper()
-	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate",
-		dbPath,
-	)
-	db, err := sql.Open("sqlite", dsn)
+	sqlBytes, err := fs.ReadFile(migrations.FS, "001_create_change_events.up.sql")
 	if err != nil {
-		t.Fatalf("openTestDB: %v", err)
+		t.Fatalf("read migration: %v", err)
 	}
-	return db
+	if _, err := pool.Exec(t.Context(), string(sqlBytes)); err != nil {
+		t.Fatalf("apply migration: %v", err)
+	}
 }
 
-func newTestStore(t *testing.T) *sqlite.Store {
+func newTestStore(t *testing.T) *postgres.Store {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db := openTestDB(t, dbPath)
-	applyTestMigrations(t, db)
-	s := sqlite.New(db, 100*time.Millisecond)
+	return postgres.New(newTestPool(t), 100*time.Millisecond)
+}
+
+func newTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	databaseURL := isolatedDatabaseURL(t)
+	pool, err := postgresdb.Open(t.Context(), databaseURL, postgresdb.PoolOptions{
+		MaxConnections: 10,
+		ConnectTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("open PostgreSQL test pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	applyTestMigrations(t, pool)
+	return pool
+}
+
+func isolatedDatabaseURL(t *testing.T) string {
+	t.Helper()
+	databaseURL := os.Getenv("PCR_TEST_POSTGRES_URL")
+	if databaseURL == "" {
+		t.Skip("PCR_TEST_POSTGRES_URL is not set")
+	}
+
+	admin, err := pgxpool.New(t.Context(), databaseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL test admin pool: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	schema := "pcr_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := admin.Exec(t.Context(), "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create test schema %q: %v", schema, err)
+	}
 	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("db close: %v", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop test schema %q: %v", schema, err)
 		}
 	})
-	return s
+
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatalf("parse PCR_TEST_POSTGRES_URL: %v", err)
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func mustTime(t *testing.T, value string) time.Time {
@@ -113,8 +138,12 @@ func TestCreate(t *testing.T) {
 			EventType:       model.EventTypeDeployment,
 			Description:     "deploy v1.2.3",
 			LongDescription: "Rolling deploy of service-foo to v1.2.3",
-			Tags:            map[string]string{"env": "prod", "service": "foo", "region": "us-east-1"},
-			CreatedAt:       ts,
+			Links: []model.EventLink{
+				{Label: "PagerDuty incident", URL: "https://example.pagerduty.com/incidents/PABC"},
+				{Label: "Rollout PR", URL: "https://github.com/example/service-foo/pull/123"},
+			},
+			Tags:      map[string]string{"env": "prod", "service": "foo", "region": "us-east-1"},
+			CreatedAt: ts,
 		}
 
 		got, err := s.Create(ctx, ev)
@@ -143,6 +172,9 @@ func TestCreate(t *testing.T) {
 		if got.ParentID != "" {
 			t.Errorf("ParentID = %q, want empty", got.ParentID)
 		}
+		if len(got.Links) != 2 || got.Links[0].Label != "PagerDuty incident" || got.Links[1].Label != "Rollout PR" {
+			t.Errorf("created Links = %#v, want both links in order", got.Links)
+		}
 		if len(got.Tags) != 3 {
 			t.Fatalf("len(Tags) = %d, want 3", len(got.Tags))
 		}
@@ -150,6 +182,14 @@ func TestCreate(t *testing.T) {
 			if got.Tags[k] != v {
 				t.Errorf("Tags[%q] = %q, want %q", k, got.Tags[k], v)
 			}
+		}
+
+		stored, err := s.GetByID(ctx, ev.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if len(stored.Links) != 2 || stored.Links[0].URL != ev.Links[0].URL || stored.Links[1].URL != ev.Links[1].URL {
+			t.Errorf("stored Links = %#v, want %#v", stored.Links, ev.Links)
 		}
 	})
 
@@ -241,6 +281,49 @@ func TestCreate(t *testing.T) {
 	})
 }
 
+func TestChangeEventTagKeysAreUnique(t *testing.T) {
+	t.Parallel()
+
+	pool := newTestPool(t)
+
+	_, err := pool.Exec(
+		t.Context(),
+		`INSERT INTO change_events
+		 (id, user_name, timestamp, event_type, description, long_description, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		"event-with-tag",
+		"alice",
+		mustTime(t, "2026-08-24T12:00:00Z"),
+		model.EventTypeDeployment,
+		"test event",
+		"",
+		mustTime(t, "2026-08-24T12:00:00Z"),
+	)
+	if err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, err := pool.Exec(
+		t.Context(),
+		`INSERT INTO change_event_tags (event_id, key, value) VALUES ($1, $2, $3)`,
+		"event-with-tag",
+		"team",
+		"payments",
+	); err != nil {
+		t.Fatalf("insert first tag: %v", err)
+	}
+
+	_, err = pool.Exec(
+		t.Context(),
+		`INSERT INTO change_event_tags (event_id, key, value) VALUES ($1, $2, $3)`,
+		"event-with-tag",
+		"team",
+		"platform",
+	)
+	if err == nil {
+		t.Fatal("inserting a second value for one event tag key succeeded")
+	}
+}
+
 func TestCreateReturnsCanonicalDefensiveCopy(t *testing.T) {
 	t.Parallel()
 
@@ -329,6 +412,98 @@ func TestToggleStarIsAtomic(t *testing.T) {
 	}
 	if !annotations.Starred {
 		t.Fatal("odd number of toggles left event unstarred")
+	}
+}
+
+func TestToggleStarIsAtomicAcrossPools(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := isolatedDatabaseURL(t)
+	openPool := func() *pgxpool.Pool {
+		pool, err := postgresdb.Open(t.Context(), databaseURL, postgresdb.PoolOptions{
+			MaxConnections: 10,
+			ConnectTimeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("open PostgreSQL test pool: %v", err)
+		}
+		t.Cleanup(pool.Close)
+		return pool
+	}
+
+	firstPool := openPool()
+	secondPool := openPool()
+	applyTestMigrations(t, firstPool)
+	stores := []*postgres.Store{
+		postgres.New(firstPool, time.Second),
+		postgres.New(secondPool, time.Second),
+	}
+
+	parent := makeEvent("cross-pool-toggle-parent", "alice", model.EventTypeDeployment, time.Now().UTC(), nil)
+	if _, err := stores[0].Create(t.Context(), parent); err != nil {
+		t.Fatalf("Create(parent) error = %v", err)
+	}
+
+	const toggles = 20
+	ctx := t.Context()
+	start := make(chan struct{})
+	errs := make(chan error, toggles)
+	var wg sync.WaitGroup
+	for i := range toggles {
+		store := stores[i%len(stores)]
+		wg.Go(func() {
+			<-start
+			_, err := store.ToggleStar(ctx, parent.ID, "concurrent-user")
+			errs <- err
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("ToggleStar() error = %v", err)
+		}
+	}
+
+	annotations, err := stores[1].GetAnnotations(t.Context(), parent.ID)
+	if err != nil {
+		t.Fatalf("GetAnnotations() error = %v", err)
+	}
+	if annotations.Starred {
+		t.Fatal("even number of cross-pool toggles left event starred")
+	}
+}
+
+func TestToggleAlertAppendsOppositeTransitions(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	parent := makeEvent("toggle-alert-parent", "alice", model.EventTypeDeployment, time.Now().UTC(), nil)
+	if _, err := s.Create(t.Context(), parent); err != nil {
+		t.Fatalf("Create(parent) error = %v", err)
+	}
+
+	opened, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	if err != nil {
+		t.Fatalf("first ToggleAlert() error = %v", err)
+	}
+	if opened.EventType != model.EventTypeAlert || opened.ParentID != parent.ID {
+		t.Errorf("first transition = %+v", opened)
+	}
+	cleared, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	if err != nil {
+		t.Fatalf("second ToggleAlert() error = %v", err)
+	}
+	if cleared.EventType != model.EventTypeClearAlert {
+		t.Errorf("second transition type = %q, want %q", cleared.EventType, model.EventTypeClearAlert)
+	}
+	annotations, err := s.GetAnnotations(t.Context(), parent.ID)
+	if err != nil {
+		t.Fatalf("GetAnnotations() error = %v", err)
+	}
+	if annotations.Alerted {
+		t.Fatal("two alert toggles left event alerted")
 	}
 }
 
@@ -541,7 +716,7 @@ func TestGetByID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // seedEvents inserts a known set of events for list tests and returns them.
-func seedEvents(t *testing.T, s *sqlite.Store) []model.ChangeEvent {
+func seedEvents(t *testing.T, s *postgres.Store) []model.ChangeEvent {
 	t.Helper()
 	ctx := context.Background()
 
@@ -884,6 +1059,215 @@ func TestList(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestListByParentID(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	ts := mustTime(t, "2026-08-24T12:00:00Z")
+	parent := makeEvent("parent", "alice", model.EventTypeDeployment, ts, nil)
+	child := makeEvent("child", "bob", model.EventTypeLink, ts.Add(time.Minute), nil)
+	child.ParentID = parent.ID
+	child.Links = []model.EventLink{{Label: "Plan", URL: "https://notion.so/example/plan"}}
+	other := makeEvent("other", "carol", model.EventTypeLink, ts.Add(2*time.Minute), nil)
+	for _, event := range []*model.ChangeEvent{parent, child, other} {
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(%s): %v", event.ID, err)
+		}
+	}
+
+	result, err := s.List(t.Context(), model.ListParams{ParentID: parent.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if result.TotalCount != 1 || len(result.Events) != 1 || result.Events[0].ID != child.ID {
+		t.Fatalf("List() = %+v, want child only", result)
+	}
+	if len(result.Events[0].Links) != 1 || result.Events[0].Links[0].Label != "Plan" {
+		t.Errorf("child links = %#v", result.Events[0].Links)
+	}
+}
+
+func TestListCurrent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("derives active logical operations", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		base := mustTime(t, "2020-01-01T00:00:00Z")
+		events := []*model.ChangeEvent{
+			makeEvent("active-change", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "active"}),
+			makeEvent("completed-start", "alice", "deployment", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "completed"}),
+			makeEvent("completed-end", "bob", "deployment", base.Add(2*time.Minute), map[string]string{"phase": "end", "change_id": "completed"}),
+			makeEvent("wrong-end-start", "alice", "deployment", base.Add(3*time.Minute), map[string]string{"phase": "start", "change_id": "still-active"}),
+			makeEvent("wrong-end", "bob", "deployment", base.Add(4*time.Minute), map[string]string{"phase": "end", "change_id": "another-id"}),
+			makeEvent("type-start", "alice", "maintenance", base.Add(5*time.Minute), map[string]string{"phase": "start", "change_id": "shared-id"}),
+			makeEvent("type-end", "bob", "deployment", base.Add(6*time.Minute), map[string]string{"phase": "end", "change_id": "shared-id"}),
+			makeEvent("legacy", "alice", "deployment", base.Add(7*time.Minute), map[string]string{"phase": "start", "deploy_id": "legacy-id"}),
+			makeEvent("precedence", "alice", "deployment", base.Add(8*time.Minute), map[string]string{"phase": "start", "change_id": "canonical-id", "deploy_id": "legacy-conflict"}),
+			makeEvent("legacy-conflict-end", "bob", "deployment", base.Add(9*time.Minute), map[string]string{"phase": "end", "deploy_id": "legacy-conflict"}),
+			makeEvent("fallback", "alice", "deployment", base.Add(10*time.Minute), map[string]string{"phase": "start", "change_id": "", "deploy_id": "fallback-id"}),
+			makeEvent("missing-id", "alice", "deployment", base.Add(11*time.Minute), map[string]string{"phase": "start"}),
+			makeEvent("empty-ids", "alice", "deployment", base.Add(12*time.Minute), map[string]string{"phase": "start", "change_id": "", "deploy_id": ""}),
+			makeEvent("duplicate-earliest", "alice", "deployment", base.Add(13*time.Minute), map[string]string{"phase": "start", "change_id": "duplicate"}),
+			makeEvent("duplicate-later", "alice", "deployment", base.Add(14*time.Minute), map[string]string{"phase": "start", "change_id": "duplicate"}),
+			makeEvent("closed-duplicate-a", "alice", "deployment", base.Add(15*time.Minute), map[string]string{"phase": "start", "change_id": "closed-duplicate"}),
+			makeEvent("closed-duplicate-b", "alice", "deployment", base.Add(16*time.Minute), map[string]string{"phase": "start", "change_id": "closed-duplicate"}),
+			makeEvent("closed-duplicate-end", "bob", "deployment", base.Add(17*time.Minute), map[string]string{"phase": "end", "change_id": "closed-duplicate"}),
+			makeEvent("meta-parent", "alice", "deployment", base.Add(18*time.Minute), nil),
+		}
+		meta := makeEvent("phase-meta", "alice", "deployment", base.Add(19*time.Minute), map[string]string{"phase": "start", "change_id": "meta-id"})
+		meta.ParentID = "meta-parent"
+		events = append(events, meta)
+		createCurrentFixtures(t, s, events...)
+
+		result, err := s.ListCurrent(t.Context(), model.CurrentParams{})
+		if err != nil {
+			t.Fatalf("ListCurrent() error = %v", err)
+		}
+
+		wantIDs := []string{
+			"duplicate-earliest",
+			"fallback",
+			"precedence",
+			"legacy",
+			"type-start",
+			"wrong-end-start",
+			"active-change",
+		}
+		assertEventIDs(t, result.Events, wantIDs)
+		if result.TotalCount != len(wantIDs) {
+			t.Errorf("TotalCount = %d, want %d", result.TotalCount, len(wantIDs))
+		}
+		if result.Events[0].Tags["change_id"] != "duplicate" {
+			t.Errorf("representative tags = %v, want hydrated duplicate start tags", result.Events[0].Tags)
+		}
+	})
+
+	t.Run("filters visibility and values after reduction", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		base := mustTime(t, "2026-08-24T10:00:00Z")
+		createCurrentFixtures(
+			t,
+			s,
+			makeEvent("payments-sev0", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "p0", "team": "payments", "scope": "service", "severity": "SEV0"}),
+			makeEvent("payments-sev1", "alice", "maintenance", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "p1", "team": "payments", "scope": "system", "severity": "sev1"}),
+			makeEvent("site-platform", "bob", "incident", base.Add(2*time.Minute), map[string]string{"phase": "start", "change_id": "site", "team": "platform", "scope": "site", "severity": "sev1"}),
+			makeEvent("unattributed", "carol", "deployment", base.Add(3*time.Minute), map[string]string{"phase": "start", "change_id": "none", "scope": "service", "severity": "sev2"}),
+			makeEvent("empty-team", "carol", "deployment", base.Add(4*time.Minute), map[string]string{"phase": "start", "change_id": "empty", "team": "", "scope": "service", "severity": "sev3"}),
+			makeEvent("platform-service", "bob", "deployment", base.Add(5*time.Minute), map[string]string{"phase": "start", "change_id": "platform", "team": "platform", "scope": "service", "severity": "sev0"}),
+			makeEvent("no-severity", "alice", "deployment", base.Add(6*time.Minute), map[string]string{"phase": "start", "change_id": "no-sev", "team": "payments", "scope": "service"}),
+		)
+
+		teamResult, err := s.ListCurrent(t.Context(), model.CurrentParams{ForTeam: "payments"})
+		if err != nil {
+			t.Fatalf("ListCurrent(ForTeam) error = %v", err)
+		}
+		assertEventIDs(t, teamResult.Events, []string{"no-severity", "empty-team", "unattributed", "site-platform", "payments-sev1", "payments-sev0"})
+
+		severityResult, err := s.ListCurrent(t.Context(), model.CurrentParams{
+			ForTeam:    "payments",
+			Severities: []string{"sev0", "SEV1"},
+		})
+		if err != nil {
+			t.Fatalf("ListCurrent(Severities) error = %v", err)
+		}
+		assertEventIDs(t, severityResult.Events, []string{"site-platform", "payments-sev1", "payments-sev0"})
+
+		scopeResult, err := s.ListCurrent(t.Context(), model.CurrentParams{Scopes: []string{"site", "system"}})
+		if err != nil {
+			t.Fatalf("ListCurrent(Scopes) error = %v", err)
+		}
+		assertEventIDs(t, scopeResult.Events, []string{"site-platform", "payments-sev1"})
+
+		typeResult, err := s.ListCurrent(t.Context(), model.CurrentParams{EventType: "maintenance"})
+		if err != nil {
+			t.Fatalf("ListCurrent(EventType) error = %v", err)
+		}
+		assertEventIDs(t, typeResult.Events, []string{"payments-sev1"})
+	})
+
+	t.Run("paginates the deduplicated deterministic result", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		base := mustTime(t, "2026-08-24T12:00:00Z")
+		createCurrentFixtures(
+			t,
+			s,
+			makeEvent("a", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "a"}),
+			makeEvent("b", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "b"}),
+			makeEvent("b-duplicate", "alice", "deployment", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "b"}),
+			makeEvent("c", "alice", "deployment", base.Add(2*time.Minute), map[string]string{"phase": "start", "change_id": "c"}),
+		)
+
+		first, err := s.ListCurrent(t.Context(), model.CurrentParams{Limit: 2})
+		if err != nil {
+			t.Fatalf("ListCurrent(first page) error = %v", err)
+		}
+		assertEventIDs(t, first.Events, []string{"c", "a"})
+		if first.TotalCount != 3 {
+			t.Errorf("first.TotalCount = %d, want 3", first.TotalCount)
+		}
+
+		second, err := s.ListCurrent(t.Context(), model.CurrentParams{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("ListCurrent(second page) error = %v", err)
+		}
+		assertEventIDs(t, second.Events, []string{"b"})
+		if second.TotalCount != 3 {
+			t.Errorf("second.TotalCount = %d, want 3", second.TotalCount)
+		}
+	})
+}
+
+func TestListCurrentByCorrelation(t *testing.T) {
+	t.Parallel()
+
+	s := newTestStore(t)
+	base := mustTime(t, "2026-08-24T12:00:00Z")
+	for _, event := range []*model.ChangeEvent{
+		makeEvent("wanted", "alice", "deployment", base, map[string]string{"phase": "start", "change_id": "wanted-id"}),
+		makeEvent("other", "bob", "deployment", base.Add(time.Minute), map[string]string{"phase": "start", "change_id": "other-id"}),
+	} {
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(%s): %v", event.ID, err)
+		}
+	}
+	result, err := s.ListCurrent(t.Context(), model.CurrentParams{
+		EventType:        "deployment",
+		CorrelationKey:   "change_id",
+		CorrelationValue: "wanted-id",
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("ListCurrent() error = %v", err)
+	}
+	assertEventIDs(t, result.Events, []string{"wanted"})
+}
+
+func createCurrentFixtures(t *testing.T, s *postgres.Store, events ...*model.ChangeEvent) {
+	t.Helper()
+	for _, event := range events {
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(%q) error = %v", event.ID, err)
+		}
+	}
+}
+
+func assertEventIDs(t *testing.T, events []model.ChangeEvent, want []string) {
+	t.Helper()
+	got := make([]string, len(events))
+	for i := range events {
+		got[i] = events[i].ID
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("event IDs = %v, want %v", got, want)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -1,12 +1,13 @@
 # Deployment Guide
 
-Three deployment methods, in order of simplicity.
+Three container deployment methods, in order of simplicity. For direct binary setup during development, see the manual setup in [testing.md](testing.md).
 
 ## 1. Docker (single container)
 
 ### Prerequisites
-- Docker (tested with 29.x)
+- Docker
 - Colima, Docker Desktop, or another Docker daemon
+- A reachable PostgreSQL database and connection URL
 
 ### Build the image
 
@@ -19,22 +20,24 @@ make docker-build
 
 ```bash
 export PCR_SESSION_SECRET="$(openssl rand -base64 48)"
+export PCR_DATABASE_URL="postgres://pcr:password@postgres.example.internal:5432/pcr?sslmode=require"
 docker run -d --name pcr-server \
   -p 8080:8080 \
   -e PCR_API_TOKENS=my-secret-token \
   -e PCR_SESSION_SECRET \
+  -e PCR_DATABASE_URL \
   -e PCR_COOKIE_SECURE=false \
-  -v pcr-data:/data \
   pcr-server
 ```
 
-The `-v pcr-data:/data` creates a named volume so the SQLite database persists across container restarts. `PCR_COOKIE_SECURE=false` is appropriate only for this local HTTP example; deployments served over HTTPS should keep the default `true`.
+The server applies PostgreSQL migrations on startup by default. `PCR_COOKIE_SECURE=false` is appropriate only for this local HTTP example; deployments served over HTTPS should keep the default `true`.
 
 ### Sanity check
 
 ```bash
-# Health check (no auth required)
-curl -s http://localhost:8080/api/v1/health | jq
+# Health checks (no auth required)
+curl -s http://localhost:8080/livez | jq
+curl -s http://localhost:8080/readyz | jq
 # Expected: {"status":"ok"}
 
 # Create an event
@@ -60,8 +63,6 @@ open "http://localhost:8080/login"
 
 ```bash
 docker stop pcr-server && docker rm pcr-server
-# To also remove the data volume:
-docker volume rm pcr-data
 ```
 
 ## 2. Docker Compose
@@ -70,6 +71,8 @@ docker volume rm pcr-data
 - Docker with Compose plugin (`docker compose version`)
 
 ### Start
+
+Compose starts PostgreSQL and persists it in the `postgres-data` volume.
 
 ```bash
 PCR_API_TOKENS=my-secret-token docker compose up -d --build
@@ -92,7 +95,7 @@ Same as Docker above -- the service is available at `http://localhost:8080`.
 
 ```bash
 # Quick end-to-end check
-curl -s http://localhost:8080/api/v1/health | jq
+curl -s http://localhost:8080/readyz | jq
 curl -s -X POST -H "Authorization: Bearer my-secret-token" \
   -H "Content-Type: application/json" \
   http://localhost:8080/api/v1/events -d '{
@@ -148,9 +151,10 @@ Before applying, edit `k8s/secret.yaml` with your actual values:
 stringData:
   api-tokens: "your-actual-token"
   session-secret: "a-random-secret-of-at-least-32-bytes"
+  database-url: "postgres://pcr:password@postgres.example.internal:5432/pcr?sslmode=require"
 ```
 
-The checked-in placeholders are not deployment credentials, and the placeholder session secret is too short for the server to accept. Replace both values before applying the manifests.
+The checked-in placeholders are not deployment credentials, and the placeholder session secret is too short for the server to accept. Replace all values before applying the manifests. The PostgreSQL host must be reachable from the `pcr` namespace.
 
 ### Apply manifests
 
@@ -158,7 +162,6 @@ The checked-in placeholders are not deployment credentials, and the placeholder 
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/pvc.yaml
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 ```
@@ -167,7 +170,7 @@ kubectl apply -f k8s/service.yaml
 
 ```bash
 kubectl -n pcr get pods
-# Wait for STATUS: Running and READY: 1/1
+# Wait for both replicas to report STATUS: Running and READY: 1/1
 
 kubectl -n pcr logs deploy/pcr-server
 # Should show: "starting server addr=:8080"
@@ -185,7 +188,8 @@ With port-forward running (in another terminal or backgrounded):
 
 ```bash
 # Health
-curl -s http://localhost:8080/api/v1/health | jq
+curl -s http://localhost:8080/livez | jq
+curl -s http://localhost:8080/readyz | jq
 
 # Create event
 curl -s -X POST -H "Authorization: Bearer your-actual-token" \
@@ -220,7 +224,7 @@ All methods use the same environment variables. Key settings:
 |---|---|---|---|
 | `PCR_API_TOKENS` | Yes | -- | Comma-separated API tokens |
 | `PCR_SESSION_SECRET` | No | (random 32-byte) | HMAC key for session cookies. Must be at least 32 bytes when set; generate via `openssl rand -base64 48`. Set for persistent sessions across restarts. |
-| `PCR_DATABASE_PATH` | No | `registry.db` (binary) / `/data/registry.db` (Docker) | Path to SQLite file |
+| `PCR_DATABASE_URL` | Yes | -- | PostgreSQL connection URL; require TLS outside local development |
 | `PCR_AUTO_MIGRATE` | No | `true` | Run schema migrations on startup |
 | `PCR_ADDR` | No | `:8080` | Listen address |
 | `PCR_REQUIRE_AUTH_READS` | No | `true` | Require auth for read endpoints |
@@ -228,7 +232,8 @@ All methods use the same environment variables. Key settings:
 | `PCR_READ_TIMEOUT` | No | `5s` | HTTP server read timeout (Go duration) |
 | `PCR_WRITE_TIMEOUT` | No | `10s` | HTTP server write timeout (Go duration) |
 | `PCR_SHUTDOWN_TIMEOUT` | No | `15s` | Graceful shutdown timeout (Go duration) |
-| `PCR_DB_BUSY_TIMEOUT` | No | `5s` | How long SQLite waits for a write lock |
+| `PCR_DB_CONNECT_TIMEOUT` | No | `5s` | PostgreSQL startup connection timeout |
+| `PCR_DB_MAX_CONNECTIONS` | No | `10` | Maximum PostgreSQL connections per replica |
 | `PCR_DB_SLOW_QUERY_THRESHOLD` | No | `100ms` | Log a warning when a store operation exceeds this |
 | `PCR_COOKIE_SECURE` | No | `true` | Set the `Secure` flag on session cookies. Set to `false` for local dev without TLS |
 
@@ -236,7 +241,10 @@ See the README for the full configuration reference.
 
 ## Notes
 
-- **SQLite limitation:** Only one instance can write to the database at a time. Docker and kind deployments are single-replica. For multi-replica, consider a PostgreSQL backend.
-- **Data persistence:** Docker uses a named volume (`pcr-data`). kind uses a PersistentVolumeClaim (`pcr-data`, 1Gi). Both survive container/pod restarts.
+- **PostgreSQL:** Use a managed PostgreSQL service with TLS, automated backups, and point-in-time recovery for production.
+- **Connection budget:** Ensure replica count multiplied by `PCR_DB_MAX_CONNECTIONS` remains below the database connection limit.
+- **Migrations:** Startup migrations use a PostgreSQL advisory lock, so concurrent replicas serialize schema changes.
 - **Image size:** The production image is based on Alpine 3.21 with a statically-linked Go binary.
-- **Restart policy:** Docker Compose sets `restart: unless-stopped`. The Kubernetes deployment uses `strategy: Recreate` to avoid two pods writing to the same volume.
+- **Rollouts:** The Kubernetes Deployment uses rolling updates with two replicas.
+- **Health checks:** Kubernetes uses dependency-free `/livez` for liveness and PostgreSQL-backed `/readyz` for startup and readiness.
+- **Pod security:** The Deployment runs as a fixed non-root UID with a read-only root filesystem, no Linux capabilities, no privilege escalation, the runtime-default seccomp profile, and no mounted service-account token.

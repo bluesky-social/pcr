@@ -1,19 +1,79 @@
 {{define "content"}}
-<section class="filters">
+<header class="dashboard-summary instrument-housing">
+    <div class="hero-metrics" aria-label="Dashboard summary">
+        <div><span>Active view</span><strong>{{.Filters.View}}</strong></div>
+        <div><span>Records</span><strong>{{.TotalCount}}</strong></div>
+        <div><span>High severity</span><strong>{{.BannerTotal}}</strong></div>
+        <div><span>Team</span><strong>{{if .Filters.Team}}{{.Filters.Team}}{{else}}all teams{{end}}</strong></div>
+    </div>
+</header>
+
+{{if .BannerEvents}}
+<section class="severity-banner instrument-housing alarm-housing" aria-label="Active high-severity changes">
+    <div class="severity-banner-header">
+        <strong>Active high-severity changes</strong><span>Operator attention required</span>
+    </div>
+    <ul class="severity-banner-list">
+        {{range .BannerEvents}}
+        <li>
+            <span class="badge severity-{{tagValue .Tags "severity"}}">{{tagValue .Tags "severity"}}</span>
+            {{if eq (tagValue .Tags "scope") "site"}}<span class="badge badge-site">Site-wide</span>{{end}}
+            <a href="/events/{{.ID}}">{{.Description}}</a>
+            <span class="banner-meta">
+                {{if tagValue .Tags "team"}}{{tagValue .Tags "team"}}{{else}}Unattributed{{end}}
+                · started {{formatTime .Timestamp}} · {{formatElapsed .Timestamp}}
+            </span>
+        </li>
+        {{end}}
+    </ul>
+    {{if gt .BannerTotal (len .BannerEvents)}}
+    <a href="{{.BannerURL}}" class="banner-more">View all {{.BannerTotal}} high-severity changes</a>
+    {{end}}
+</section>
+{{end}}
+
+<nav class="view-tabs signal-tabs" aria-label="Dashboard views">
+    <a href="{{dashboardViewURL "current" .Filters.Team}}"{{if eq .Filters.View "current"}} class="active" aria-current="page"{{end}}>Current</a>
+    <a href="{{dashboardViewURL "site" .Filters.Team}}"{{if eq .Filters.View "site"}} class="active" aria-current="page"{{end}}>Site-wide</a>
+    <a href="{{dashboardViewURL "history" .Filters.Team}}"{{if eq .Filters.View "history"}} class="active" aria-current="page"{{end}}>History</a>
+    <a href="{{dashboardViewURL "alerts" .Filters.Team}}"{{if eq .Filters.View "alerts"}} class="active" aria-current="page"{{end}}>Alerts</a>
+</nav>
+
+<section class="filters instrument-housing filter-housing">
+    {{if or (eq .Filters.View "current") (eq .Filters.View "site")}}
+    <form method="GET" action="/" class="filter-form filter-form-inline">
+        <input type="hidden" name="view" value="{{.Filters.View}}">
+        {{range .Filters.Scopes}}<input type="hidden" name="scope" value="{{.}}">{{end}}
+        {{range .Filters.Severities}}<input type="hidden" name="severity" value="{{.}}">{{end}}
+        {{if eq .Filters.View "current"}}
+        <div class="filter-group">
+            <label for="team">Team</label>
+            <input type="text" id="team" name="team" placeholder="e.g. payments" value="{{.Filters.Team}}">
+        </div>
+        {{else if .Filters.Team}}
+        <input type="hidden" name="team" value="{{.Filters.Team}}">
+        {{end}}
+        <div class="filter-group">
+            <label for="current-type">Event Type</label>
+            <input type="text" id="current-type" name="type" placeholder="e.g. deployment" value="{{.Filters.EventType}}">
+        </div>
+        <div class="filter-actions"><button type="submit">Filter</button></div>
+    </form>
+    {{else}}
     <div class="time-range-bar">
         <span class="time-range-label">Time range:</span>
-        <a href="/?range=5m" class="time-range-btn{{if eq .Filters.Range "5m"}} active{{end}}">Last 5 min</a>
-        <a href="/?range=30m" class="time-range-btn{{if eq .Filters.Range "30m"}} active{{end}}">Last 30 min</a>
-        <a href="/?range=1h" class="time-range-btn{{if eq .Filters.Range "1h"}} active{{end}}">Last hour</a>
-        <a href="/?range=24h" class="time-range-btn{{if eq .Filters.Range "24h"}} active{{end}}">Last 24 hours</a>
-        <a href="/?range=custom" class="time-range-btn{{if eq .Filters.Range "custom"}} active{{end}}" id="custom-toggle">Custom</a>
-        <span class="time-range-sep"></span>
-        <a href="/?alerted=true" class="time-range-btn btn-alerts{{if .Filters.Alerted}} active{{end}}">Alerts</a>
-        {{if or .Filters.Range .Filters.Alerted}}<a href="/" class="btn-clear">Clear</a>{{end}}
+        <a href="{{dashboardRangeURL .Filters.View .Filters.Team "5m"}}" class="time-range-btn{{if eq .Filters.Range "5m"}} active{{end}}">Last 5 min</a>
+        <a href="{{dashboardRangeURL .Filters.View .Filters.Team "30m"}}" class="time-range-btn{{if eq .Filters.Range "30m"}} active{{end}}">Last 30 min</a>
+        <a href="{{dashboardRangeURL .Filters.View .Filters.Team "1h"}}" class="time-range-btn{{if eq .Filters.Range "1h"}} active{{end}}">Last hour</a>
+        <a href="{{dashboardRangeURL .Filters.View .Filters.Team "24h"}}" class="time-range-btn{{if eq .Filters.Range "24h"}} active{{end}}">Last 24 hours</a>
+        <a href="{{dashboardRangeURL .Filters.View .Filters.Team "custom"}}" class="time-range-btn{{if eq .Filters.Range "custom"}} active{{end}}" id="custom-toggle">Custom</a>
+        <a href="{{dashboardViewURL .Filters.View .Filters.Team}}" class="btn-clear">Clear</a>
     </div>
 
     <form method="GET" action="/" class="filter-form" id="custom-range"{{if ne .Filters.Range "custom"}} style="display:none"{{end}}>
+        <input type="hidden" name="view" value="{{.Filters.View}}">
         <input type="hidden" name="range" value="custom">
+        {{if .Filters.Team}}<input type="hidden" name="team" value="{{.Filters.Team}}">{{end}}
         <div class="filter-group">
             <label for="start_after">From</label>
             <input type="datetime-local" id="start_after" name="start_after" value="{{.Filters.StartAfter}}">
@@ -30,14 +90,14 @@
             <label for="user">User</label>
             <input type="text" id="user" name="user" placeholder="e.g. alice" value="{{.Filters.UserName}}">
         </div>
-        <div class="filter-actions">
-            <button type="submit">Apply</button>
-        </div>
+        <div class="filter-actions"><button type="submit">Apply</button></div>
     </form>
 
-    {{if and (ne .Filters.Range "custom") (ne .Filters.Range "")}}
+    {{if ne .Filters.Range "custom"}}
     <form method="GET" action="/" class="filter-form filter-form-inline">
+        <input type="hidden" name="view" value="{{.Filters.View}}">
         <input type="hidden" name="range" value="{{.Filters.Range}}">
+        {{if .Filters.Team}}<input type="hidden" name="team" value="{{.Filters.Team}}">{{end}}
         <div class="filter-group">
             <label for="type2">Event Type</label>
             <input type="text" id="type2" name="type" placeholder="e.g. deployment" value="{{.Filters.EventType}}">
@@ -46,67 +106,63 @@
             <label for="user2">User</label>
             <input type="text" id="user2" name="user" placeholder="e.g. alice" value="{{.Filters.UserName}}">
         </div>
-        <div class="filter-actions">
-            <button type="submit">Filter</button>
-        </div>
+        <div class="filter-actions"><button type="submit">Filter</button></div>
     </form>
+    {{end}}
+    <script>
+    document.getElementById('custom-toggle').addEventListener('click', function(e) {
+        var form = document.getElementById('custom-range');
+        if (form.style.display === 'none') {
+            e.preventDefault();
+            form.style.display = '';
+        }
+    });
+    </script>
     {{end}}
 </section>
 
-<script>
-document.getElementById('custom-toggle').addEventListener('click', function(e) {
-    var form = document.getElementById('custom-range');
-    if (form.style.display === 'none') {
-        e.preventDefault();
-        form.style.display = '';
-    }
-});
-</script>
-
 {{if .Filters.Tags}}
-<div class="active-filters">
+<div class="active-filters instrument-housing">
     <span>Filtering by tags:</span>
-    {{range .Filters.Tags}}
-    <span class="badge badge-active">{{.}} <a href="/" class="badge-remove">&times;</a></span>
-    {{end}}
+    {{range .Filters.Tags}}<span class="badge badge-active">{{.}} <a href="/" class="badge-remove">&times;</a></span>{{end}}
 </div>
 {{end}}
 
 {{if .Events}}
-<div class="table-wrapper">
+<section class="telemetry-housing instrument-housing">
+    <div class="results-summary">Showing {{.OffsetStart}}–{{.OffsetEnd}} of {{.TotalCount}}</div>
+<div class="table-wrapper display-zone">
     <table class="events-table">
         <thead>
-            <tr>
-                <th class="col-status"></th>
-                <th>Time</th>
-                <th>User</th>
-                <th>Type</th>
-                <th>Description</th>
-                <th>Tags</th>
-            </tr>
+            {{if or (eq .Filters.View "current") (eq .Filters.View "site")}}
+            <tr><th class="col-status"></th><th>Started</th><th class="col-elapsed">Elapsed</th><th class="col-team">Team</th><th class="col-scope">Scope</th><th class="col-severity">Severity</th><th>Type</th><th>Description</th></tr>
+            {{else}}
+            <tr><th class="col-status"></th><th>Time</th><th class="col-user">User</th><th>Type</th><th>Description</th><th class="col-tags">Tags</th></tr>
+            {{end}}
         </thead>
         <tbody>
             {{range .Events}}
-            <tr class="type-{{.EventType}}{{if .Alerted}} row-alerted{{end}}">
+            <tr class="type-{{.EventType}}{{if .Alerted}} row-alerted{{end}}{{if eq (tagValue .Tags "scope") "site"}} row-site{{end}}">
                 <td class="col-status">
                     <form method="POST" action="/events/{{.ID}}/star" class="star-form">
                         <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                        <button type="submit" class="star-btn{{if .Starred}} starred{{end}}" title="{{if .Starred}}Unstar{{else}}Star{{end}}">
-                            {{if .Starred}}&#9733;{{else}}&#9734;{{end}}
-                        </button>
+                        <button type="submit" class="star-btn{{if .Starred}} starred{{end}}" title="{{if .Starred}}Unstar{{else}}Star{{end}}">{{if .Starred}}&#9733;{{else}}&#9734;{{end}}</button>
                     </form>
                     {{if .Alerted}}<span class="alert-icon" title="Alert">&#9888;</span>{{end}}
                 </td>
+                {{if or (eq $.Filters.View "current") (eq $.Filters.View "site")}}
                 <td><a href="/events/{{.ID}}">{{formatTime .Timestamp}}</a></td>
-                <td>{{.UserName}}</td>
+                <td class="col-elapsed">{{formatElapsed .Timestamp}}</td>
+                <td class="col-team">{{if tagValue .Tags "team"}}{{tagValue .Tags "team"}}{{else}}<span class="unattributed">Unattributed</span>{{end}}</td>
+                <td class="col-scope">{{if eq (tagValue .Tags "scope") "site"}}<span class="badge badge-site">Site-wide</span>{{else}}{{tagValue .Tags "scope"}}{{end}}</td>
+                <td class="col-severity">{{if tagValue .Tags "severity"}}<span class="badge severity-{{tagValue .Tags "severity"}}">{{tagValue .Tags "severity"}}</span>{{end}}</td>
                 <td>{{.EventType}}</td>
-                <td>{{.Description}}</td>
-                <td>
-                    {{$tags := .Tags}}
-                    {{range $k, $v := $tags}}
-                    <a href="{{tagFilterURL $k $v}}" class="badge badge-link">{{$k}}={{$v}}</a>
-                    {{end}}
-                </td>
+                <td><a href="/events/{{.ID}}">{{.Description}}</a>{{if .Links}} <span class="event-link-count">{{len .Links}} links</span>{{end}}</td>
+                {{else}}
+                <td><a href="/events/{{.ID}}">{{formatTime .Timestamp}}</a></td>
+                <td class="col-user">{{.UserName}}</td><td>{{.EventType}}</td><td><a href="/events/{{.ID}}">{{.Description}}</a>{{if .Links}} <span class="event-link-count">{{len .Links}} links</span>{{end}}</td>
+                <td class="col-tags">{{range $k, $v := .Tags}}<a href="{{tagFilterURL $k $v}}" class="badge badge-link">{{$k}}={{$v}}</a>{{end}}</td>
+                {{end}}
             </tr>
             {{end}}
         </tbody>
@@ -114,15 +170,14 @@ document.getElementById('custom-toggle').addEventListener('click', function(e) {
 </div>
 
 <div class="pagination">
-    {{if .HasPrev}}
-    <a href="{{.PrevURL}}" class="pagination-link">&laquo; Previous</a>
-    {{end}}
+    {{if .HasPrev}}<a href="{{.PrevURL}}" class="pagination-link">&laquo; Previous</a>{{end}}
     <span class="pagination-info">Showing {{.OffsetStart}}–{{.OffsetEnd}} of {{.TotalCount}}</span>
-    {{if .HasNext}}
-    <a href="{{.NextURL}}" class="pagination-link">Next &raquo;</a>
-    {{end}}
+    {{if .HasNext}}<a href="{{.NextURL}}" class="pagination-link">Next &raquo;</a>{{end}}
 </div>
+</section>
+{{else if or (eq .Filters.View "current") (eq .Filters.View "site")}}
+<div class="empty-state instrument-housing"><strong>No active changes found.</strong></div>
 {{else}}
-<p class="empty-state">No events found.</p>
+<div class="empty-state instrument-housing"><strong>No events found.</strong></div>
 {{end}}
 {{end}}
