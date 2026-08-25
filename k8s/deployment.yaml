@@ -17,10 +17,23 @@ spec:
       labels:
         app: pcr-server
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: pcr-server
           image: pcr-server:latest
           imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 8080
               name: http
@@ -45,19 +58,19 @@ spec:
                   key: database-url
           startupProbe:
             httpGet:
-              path: /api/v1/health
+              path: /readyz
               port: http
             periodSeconds: 10
             failureThreshold: 30
           livenessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /livez
               port: http
             initialDelaySeconds: 5
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /readyz
               port: http
             initialDelaySeconds: 3
             periodSeconds: 10

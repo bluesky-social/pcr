@@ -30,10 +30,16 @@ func NewAPIHandler(svc *service.ChangeService, db Pinger) *APIHandler {
 	return &APIHandler{svc: svc, db: db}
 }
 
-// HealthCheck verifies that the service is running and the database is reachable.
-func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+// Liveness reports whether the HTTP process can serve requests. It deliberately
+// avoids dependencies so an external outage does not trigger restart loops.
+func (h *APIHandler) Liveness(w http.ResponseWriter, r *http.Request) {
+	writeJSON(r.Context(), w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Readiness reports whether the service can reach PostgreSQL and accept traffic.
+func (h *APIHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 	if err := h.db.Ping(r.Context()); err != nil {
-		slog.ErrorContext(r.Context(), "health check failed: database unreachable", "error", err)
+		slog.ErrorContext(r.Context(), "readiness check failed: database unreachable", "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if encErr := json.NewEncoder(w).Encode(map[string]string{
@@ -46,6 +52,11 @@ func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(r.Context(), w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HealthCheck preserves the original database-aware health endpoint.
+func (h *APIHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	h.Readiness(w, r)
 }
 
 func (h *APIHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {

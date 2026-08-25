@@ -1,11 +1,11 @@
 # Deployment Guide
 
-Three deployment methods, in order of simplicity.
+Three container deployment methods, in order of simplicity. For direct binary setup during development, see the manual setup in [testing.md](testing.md).
 
 ## 1. Docker (single container)
 
 ### Prerequisites
-- Docker (tested with 29.x)
+- Docker
 - Colima, Docker Desktop, or another Docker daemon
 - A reachable PostgreSQL database and connection URL
 
@@ -35,8 +35,9 @@ The server applies PostgreSQL migrations on startup by default. `PCR_COOKIE_SECU
 ### Sanity check
 
 ```bash
-# Health check (no auth required)
-curl -s http://localhost:8080/api/v1/health | jq
+# Health checks (no auth required)
+curl -s http://localhost:8080/livez | jq
+curl -s http://localhost:8080/readyz | jq
 # Expected: {"status":"ok"}
 
 # Create an event
@@ -94,7 +95,7 @@ Same as Docker above -- the service is available at `http://localhost:8080`.
 
 ```bash
 # Quick end-to-end check
-curl -s http://localhost:8080/api/v1/health | jq
+curl -s http://localhost:8080/readyz | jq
 curl -s -X POST -H "Authorization: Bearer my-secret-token" \
   -H "Content-Type: application/json" \
   http://localhost:8080/api/v1/events -d '{
@@ -187,7 +188,8 @@ With port-forward running (in another terminal or backgrounded):
 
 ```bash
 # Health
-curl -s http://localhost:8080/api/v1/health | jq
+curl -s http://localhost:8080/livez | jq
+curl -s http://localhost:8080/readyz | jq
 
 # Create event
 curl -s -X POST -H "Authorization: Bearer your-actual-token" \
@@ -244,3 +246,5 @@ See the README for the full configuration reference.
 - **Migrations:** Startup migrations use a PostgreSQL advisory lock, so concurrent replicas serialize schema changes.
 - **Image size:** The production image is based on Alpine 3.21 with a statically-linked Go binary.
 - **Rollouts:** The Kubernetes Deployment uses rolling updates with two replicas.
+- **Health checks:** Kubernetes uses dependency-free `/livez` for liveness and PostgreSQL-backed `/readyz` for startup and readiness.
+- **Pod security:** The Deployment runs as a fixed non-root UID with a read-only root filesystem, no Linux capabilities, no privilege escalation, the runtime-default seccomp profile, and no mounted service-account token.

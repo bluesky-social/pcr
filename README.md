@@ -46,7 +46,9 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/health` | Health check (no auth required, verifies DB connectivity) |
+| `GET` | `/livez` | Process liveness (no auth or dependency checks) |
+| `GET` | `/readyz` | Traffic readiness (no auth, verifies PostgreSQL connectivity) |
+| `GET` | `/api/v1/health` | Backwards-compatible alias for `/readyz` |
 | `POST` | `/api/v1/events` | Create a change event or meta-event |
 | `GET` | `/api/v1/events` | List events (with filters) |
 | `GET` | `/api/v1/current` | List active logical operations derived from phase events |
@@ -102,17 +104,19 @@ Current results have no time bound. Filters apply after start/end events have be
 
 ### Examples
 
-**Health check:**
+**Health checks:**
 
-The health endpoint does not require authentication and verifies database connectivity.
-It is suitable for use as a Kubernetes liveness/readiness probe or load balancer health check.
+Health endpoints do not require authentication. Liveness deliberately avoids PostgreSQL so a database outage does not cause a container restart loop; readiness verifies that the service can reach PostgreSQL before it receives traffic.
 
 ```bash
-# No auth needed
-curl -s http://localhost:8080/api/v1/health
+# Process is serving HTTP; always independent of PostgreSQL.
+curl -s http://localhost:8080/livez
 # Returns 200: {"status":"ok"}
 
-# When database is unreachable:
+# Service is ready to receive traffic.
+curl -s http://localhost:8080/readyz
+# Returns 200: {"status":"ok"}
+# When PostgreSQL is unreachable:
 # Returns 503: {"status":"unhealthy","reason":"database unreachable"}
 ```
 
@@ -259,7 +263,7 @@ To unstar, another meta-event is created:
 }
 ```
 
-The current state is derived independently for each transition pair. Meta-events are considered in reverse creation order (`created_at`, then `id` as a tie-breaker): the newest `star` or `unstar` determines `starred`, and the newest `alert` or `clear-alert` determines `alerted`. An event with no transition in a pair has the corresponding state set to `false`. The meta-event's `timestamp` does not control reduction order.
+The current state is derived independently for each transition pair. Meta-events are considered in reverse database insertion order: the newest `star` or `unstar` determines `starred`, and the newest `alert` or `clear-alert` determines `alerted`. An event with no transition in a pair has the corresponding state set to `false`. Caller-supplied timestamps do not control reduction order.
 
 The `GET /api/v1/events/{id}/annotations` endpoint returns this computed state. `GET /api/v1/events?alerted=true` uses the same latest-transition rule to return events whose alert state is currently active.
 
@@ -339,7 +343,7 @@ Display and visibility tags come from the representative start event:
 
 A tag key may appear at most once on an event. The database enforces this invariant. End events need only `phase`, the matching correlation identifier, and the same event type.
 
-The close endpoint and dashboard action construct that end event automatically. They only accept a correlated start that is still in Current and use a deterministic `external_id`, so concurrent or retried closes do not create duplicate closure events.
+The close endpoint and dashboard action construct that end event automatically. They accept a correlated start while its logical operation remains open and use a deterministic `external_id`, so concurrent or retried closes do not create duplicate closure events.
 
 ## Idempotency
 
@@ -454,9 +458,13 @@ There are no mutable `timestamp_start`, `timestamp_end`, `starred`, `alerted`, o
 ## Architecture
 
 ```
-cmd/server/        Entry point (main)
+cmd/
+  server/          HTTP server
+  seed/            Fixture loader for a running server
+  smoke/           End-to-end HTTP smoke client
 internal/
   config/          Environment-based configuration
+  fixture/         Shared JSON fixture loading
   model/           Domain types (ChangeEvent, ListParams, request/response structs)
   postgres/        PostgreSQL pool and migration lifecycle
   store/           PostgreSQL data access layer (ChangeStore interface)
@@ -466,6 +474,8 @@ internal/
   router/          Route definitions (chi)
 migrations/        SQL migration files
 web/               Embedded static assets and HTML templates
+testdata/           Functional fixtures
+k8s/                Example Kubernetes manifests
 docs/              Deployment and testing guides
 ```
 
@@ -480,7 +490,7 @@ Four deployment options, from simplest to most production-like:
 | **Docker Compose** | `PCR_API_TOKENS=token docker compose up -d --build` | Local dev with persistence |
 | **Kubernetes (kind)** | `kind create cluster` + `kubectl apply -f k8s/` | Testing k8s deployment |
 
-See [docs/deployment.md](docs/deployment.md) for full instructions, including sanity checks for each method.
+See [docs/deployment.md](docs/deployment.md) for full container and Kubernetes instructions. For direct binary setup, see the manual setup in [docs/testing.md](docs/testing.md).
 
 ### Production session secret
 
@@ -594,6 +604,8 @@ All responses include `Referrer-Policy: no-referrer` and `X-Content-Type-Options
 
 Tokens are configured through the `PCR_API_TOKENS` environment variable (comma-separated). The following routes do not require authentication:
 
-- `/api/v1/health` — health check
+- `/livez` — dependency-free liveness check
+- `/readyz` — PostgreSQL-backed readiness check
+- `/api/v1/health` — backwards-compatible readiness check
 - `/static/*` — CSS and static assets
 - `/login` — session login endpoint

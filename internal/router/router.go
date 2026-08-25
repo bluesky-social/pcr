@@ -24,9 +24,11 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Use(chimiddleware.Recoverer)
 	r.Use(chimiddleware.Timeout(30 * time.Second))
 
-	// Static files and health check are served without authentication.
+	// Static files and health checks are served without authentication.
 	staticFS := http.FileServerFS(web.StaticFS)
 	r.Handle("/static/*", staticFS)
+	r.Get("/livez", apiHandler.Liveness)
+	r.Get("/readyz", apiHandler.Readiness)
 	r.Get("/api/v1/health", apiHandler.HealthCheck)
 	r.Get("/login", loginHandler.ShowLoginForm)
 	r.Post("/login", loginHandler.Login)

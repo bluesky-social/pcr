@@ -66,10 +66,11 @@ export PCR_TOKEN=test-token
 alias pcr='curl -sS -H "Authorization: Bearer $PCR_TOKEN" -H "Content-Type: application/json"'
 ```
 
-The unauthenticated health check should return `{"status":"ok"}`:
+The unauthenticated liveness and readiness checks should return `{"status":"ok"}`:
 
 ```bash
-curl -sS http://localhost:8080/api/v1/health | jq
+curl -sS http://localhost:8080/livez | jq
+curl -sS http://localhost:8080/readyz | jq
 ```
 
 ## Verify current alert state
@@ -179,7 +180,7 @@ Open `http://localhost:8080/login`, enter `test-token`, and verify:
 5. Time-range, event-type, user, and tag filters change History rows.
 6. The star button changes the event's current star annotation.
 7. An actively alerted event has alert styling and appears in the Alerts view if its parent event is within the selected time range.
-8. The detail page displays the event and its current annotation state. It does not display the meta-event history.
+8. The detail page displays lifecycle and annotation state, aggregated links, and an oldest-first activity trail of child annotations and correlated closure events.
 9. The page refreshes at the configured `PCR_DASHBOARD_REFRESH_SEC` interval.
 
 ## Idempotency
@@ -190,6 +191,6 @@ Open `http://localhost:8080/login`, enter `test-token`, and verify:
 
 With the default `PCR_REQUIRE_AUTH_READS=true`:
 
-- `/api/v1/health`, `/login`, and `/static/*` are public.
+- `/livez`, `/readyz`, `/api/v1/health`, `/login`, and `/static/*` are public.
 - API reads and writes require a Bearer token or the backwards-compatible `token` query parameter. Dashboard routes also accept a valid session cookie.
 - Setting `PCR_REQUIRE_AUTH_READS=false` makes `GET` and `HEAD` requests public; writes still require authentication.

@@ -12,9 +12,9 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata
 
-# Create a non-root runtime user.
-RUN addgroup -S pcr && adduser -S pcr -G pcr
-USER pcr
+# Use a stable numeric identity so container runtimes can enforce non-root execution.
+RUN addgroup -S -g 10001 pcr && adduser -S -D -H -u 10001 -G pcr pcr
+USER 10001:10001
 
 COPY --from=builder /bin/pcr-server /usr/local/bin/pcr-server
 
@@ -24,6 +24,6 @@ ENV PCR_ADDR=:8080 \
     PCR_AUTO_MIGRATE=true
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget -qO- http://localhost:8080/api/v1/health || exit 1
+    CMD wget -qO- http://localhost:8080/readyz || exit 1
 
 ENTRYPOINT ["pcr-server"]

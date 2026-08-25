@@ -274,16 +274,18 @@ func TestAuthEnforcement(t *testing.T) {
 		}
 	})
 
-	t.Run("health endpoint is accessible without auth", func(t *testing.T) {
+	t.Run("health endpoints are accessible without auth", func(t *testing.T) {
 		t.Parallel()
 
 		r, _ := newTestRouter(t, true)
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/health", nil)
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+		for _, path := range []string{"/livez", "/readyz", "/api/v1/health"} {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 for health, got %d", rec.Code)
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d, want %d", path, rec.Code, http.StatusOK)
+			}
 		}
 	})
 

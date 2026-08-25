@@ -116,6 +116,8 @@ func newTestStack() *testStack {
 	h := handler.NewAPIHandler(svc, &mockPinger{})
 
 	r := chi.NewRouter()
+	r.Get("/livez", h.Liveness)
+	r.Get("/readyz", h.Readiness)
 	r.Get("/api/v1/health", h.HealthCheck)
 	r.Post("/api/v1/events", h.CreateEvent)
 	r.Get("/api/v1/events", h.ListEvents)
@@ -136,29 +138,60 @@ func newTestStack() *testStack {
 	}
 }
 
-// ---------- HealthCheck ----------
+// ---------- Health checks ----------
 
-func TestHealthCheck(t *testing.T) {
+func TestLivenessDoesNotDependOnDatabase(t *testing.T) {
+	t.Parallel()
+
+	ms := &mockStore{}
+	svc := service.NewChangeService(ms)
+	h := handler.NewAPIHandler(svc, &mockPinger{err: errors.New("connection refused")})
+
+	r := chi.NewRouter()
+	r.Get("/livez", h.Liveness)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/livez", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /livez status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode GET /livez response: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("GET /livez status field = %q, want %q", body["status"], "ok")
+	}
+}
+
+func TestReadiness(t *testing.T) {
 	t.Parallel()
 
 	t.Run("healthy database returns 200", func(t *testing.T) {
 		t.Parallel()
 
 		ts := newTestStack()
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/health", nil)
-		rec := httptest.NewRecorder()
-		ts.router.ServeHTTP(rec, req)
+		for _, path := range []string{"/readyz", "/api/v1/health"} {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			ts.router.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", rec.Code)
-		}
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d, want %d", path, rec.Code, http.StatusOK)
+				continue
+			}
 
-		var body map[string]string
-		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-		if body["status"] != "ok" {
-			t.Fatalf("expected status ok, got %q", body["status"])
+			var body map[string]string
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Errorf("decode GET %s response: %v", path, err)
+				continue
+			}
+			if body["status"] != "ok" {
+				t.Errorf("GET %s status field = %q, want %q", path, body["status"], "ok")
+			}
 		}
 	})
 
@@ -170,22 +203,27 @@ func TestHealthCheck(t *testing.T) {
 		h := handler.NewAPIHandler(svc, &mockPinger{err: errors.New("connection refused")})
 
 		r := chi.NewRouter()
+		r.Get("/readyz", h.Readiness)
 		r.Get("/api/v1/health", h.HealthCheck)
 
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/health", nil)
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+		for _, path := range []string{"/readyz", "/api/v1/health"} {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("expected status 503, got %d", rec.Code)
-		}
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("GET %s status = %d, want %d", path, rec.Code, http.StatusServiceUnavailable)
+				continue
+			}
 
-		var body map[string]string
-		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-			t.Fatalf("failed to decode response: %v", err)
-		}
-		if body["status"] != "unhealthy" {
-			t.Fatalf("expected status unhealthy, got %q", body["status"])
+			var body map[string]string
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Errorf("decode GET %s response: %v", path, err)
+				continue
+			}
+			if body["status"] != "unhealthy" {
+				t.Errorf("GET %s status field = %q, want %q", path, body["status"], "unhealthy")
+			}
 		}
 	})
 }
