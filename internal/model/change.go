@@ -2,6 +2,14 @@ package model
 
 import "time"
 
+// UserIdentity is the authenticated actor attached to an immutable event.
+// Provider and Subject are empty for API-supplied user names.
+type UserIdentity struct {
+	Name     string
+	Provider string
+	Subject  string
+}
+
 // Well-known event type constants.
 const (
 	EventTypeDeployment  = "deployment"
@@ -30,6 +38,8 @@ type ChangeEvent struct {
 	ExternalID      string            `json:"external_id,omitempty"`
 	ParentID        string            `json:"parent_id,omitempty"`
 	UserName        string            `json:"user_name"`
+	UserProvider    string            `json:"user_provider,omitempty"`
+	UserSubject     string            `json:"user_subject,omitempty"`
 	Timestamp       time.Time         `json:"timestamp"`
 	EventType       string            `json:"event_type"`
 	Description     string            `json:"description"`
@@ -121,6 +131,8 @@ type CreateChangeRequest struct {
 	ParentID        string            `json:"parent_id,omitempty"`
 	ExternalID      string            `json:"external_id,omitempty"`
 	UserName        string            `json:"user_name"`
+	UserProvider    string            `json:"-"`
+	UserSubject     string            `json:"-"`
 	Timestamp       *time.Time        `json:"timestamp,omitempty"`
 	EventType       string            `json:"event_type"`
 	Description     string            `json:"description"`

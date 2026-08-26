@@ -74,6 +74,8 @@ func (s *ChangeService) Create(ctx context.Context, req *model.CreateChangeReque
 		ExternalID:      req.ExternalID,
 		ParentID:        req.ParentID,
 		UserName:        req.UserName,
+		UserProvider:    req.UserProvider,
+		UserSubject:     req.UserSubject,
 		Timestamp:       ts,
 		EventType:       req.EventType,
 		Description:     req.Description,
@@ -151,15 +153,22 @@ func (s *ChangeService) GetAnnotationsBatch(ctx context.Context, eventIDs []stri
 
 // AddLinks appends an immutable link annotation to an existing event.
 func (s *ChangeService) AddLinks(ctx context.Context, eventID, userName string, links []model.EventLink) (*model.ChangeEvent, error) {
+	return s.AddLinksAs(ctx, eventID, model.UserIdentity{Name: userName}, links)
+}
+
+// AddLinksAs appends links attributed to an authenticated identity.
+func (s *ChangeService) AddLinksAs(ctx context.Context, eventID string, user model.UserIdentity, links []model.EventLink) (*model.ChangeEvent, error) {
 	if len(links) == 0 {
 		return nil, ErrLinksRequired
 	}
 	return s.Create(ctx, &model.CreateChangeRequest{
-		ParentID:    eventID,
-		UserName:    userName,
-		EventType:   model.EventTypeLink,
-		Description: "added external links",
-		Links:       links,
+		ParentID:     eventID,
+		UserName:     user.Name,
+		UserProvider: user.Provider,
+		UserSubject:  user.Subject,
+		EventType:    model.EventTypeLink,
+		Description:  "added external links",
+		Links:        links,
 	})
 }
 
@@ -233,7 +242,12 @@ func (s *ChangeService) OperationState(ctx context.Context, event *model.ChangeE
 
 // CloseOperation appends an idempotent end event for a correlated start.
 func (s *ChangeService) CloseOperation(ctx context.Context, eventID, userName, description string) (*model.ChangeEvent, error) {
-	if userName == "" {
+	return s.CloseOperationAs(ctx, eventID, model.UserIdentity{Name: userName}, description)
+}
+
+// CloseOperationAs appends a correlated end event attributed to an authenticated identity.
+func (s *ChangeService) CloseOperationAs(ctx context.Context, eventID string, user model.UserIdentity, description string) (*model.ChangeEvent, error) {
+	if user.Name == "" {
 		return nil, ErrUserNameRequired
 	}
 	start, err := s.GetByID(ctx, eventID)
@@ -260,11 +274,13 @@ func (s *ChangeService) CloseOperation(ctx context.Context, eventID, userName, d
 	tags[key] = value
 	tags["phase"] = "end"
 	created, err := s.Create(ctx, &model.CreateChangeRequest{
-		ExternalID:  operationCloseExternalID(start.EventType, key, value),
-		UserName:    userName,
-		EventType:   start.EventType,
-		Description: description,
-		Tags:        tags,
+		ExternalID:   operationCloseExternalID(start.EventType, key, value),
+		UserName:     user.Name,
+		UserProvider: user.Provider,
+		UserSubject:  user.Subject,
+		EventType:    start.EventType,
+		Description:  description,
+		Tags:         tags,
 	})
 	if errors.Is(err, store.ErrDuplicate) {
 		return created, nil
@@ -292,7 +308,12 @@ func operationIdentity(event *model.ChangeEvent) (string, string, bool) {
 
 // ToggleStar creates a star or unstar meta-event for the given event.
 func (s *ChangeService) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
-	event, err := s.store.ToggleStar(ctx, eventID, userName)
+	return s.ToggleStarAs(ctx, eventID, model.UserIdentity{Name: userName})
+}
+
+// ToggleStarAs appends a star transition attributed to an authenticated identity.
+func (s *ChangeService) ToggleStarAs(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
+	event, err := s.store.ToggleStar(ctx, eventID, user)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrEventNotFound
 	}
@@ -301,7 +322,12 @@ func (s *ChangeService) ToggleStar(ctx context.Context, eventID, userName string
 
 // ToggleAlert creates an alert or clear-alert meta-event for the given event.
 func (s *ChangeService) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
-	event, err := s.store.ToggleAlert(ctx, eventID, userName)
+	return s.ToggleAlertAs(ctx, eventID, model.UserIdentity{Name: userName})
+}
+
+// ToggleAlertAs appends an alert transition attributed to an authenticated identity.
+func (s *ChangeService) ToggleAlertAs(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
+	event, err := s.store.ToggleAlert(ctx, eventID, user)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrEventNotFound
 	}

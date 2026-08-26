@@ -90,6 +90,12 @@ func (s *localServer) start(ctx context.Context) error {
 		"PCR_COOKIE_SECURE=false",
 		"PCR_DATABASE_URL="+s.databaseURL,
 		"PCR_ADDR="+s.addr,
+		"PCR_HUMAN_AUTH_PROVIDER=github",
+		"PCR_PUBLIC_URL=http://127.0.0.1"+s.addr,
+		"PCR_OAUTH_CLIENT_ID=smoke-client-id",
+		"PCR_OAUTH_CLIENT_SECRET=smoke-client-secret",
+		"PCR_HUMAN_AUTH_ALLOW_ANY=true",
+		"PCR_HUMAN_SESSION_DURATION=12h",
 	)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

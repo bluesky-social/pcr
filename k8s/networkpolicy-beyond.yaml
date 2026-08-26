@@ -1,0 +1,25 @@
+# Required when PCR trusts X-Beyond-* identity headers. The policy makes
+# Beyond the only workload that can reach PCR's application port, so another
+# in-cluster pod cannot impersonate a user by forging those headers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pcr-only-from-beyond
+  namespace: pcr
+spec:
+  podSelector:
+    matchLabels:
+      app: pcr-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: beyond
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: beyond
+      ports:
+        - port: 8080
+          protocol: TCP

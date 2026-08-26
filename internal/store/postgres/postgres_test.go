@@ -134,6 +134,8 @@ func TestCreate(t *testing.T) {
 		ev := &model.ChangeEvent{
 			ID:              "evt-001",
 			UserName:        "alice",
+			UserProvider:    "github",
+			UserSubject:     "12345",
 			Timestamp:       ts,
 			EventType:       model.EventTypeDeployment,
 			Description:     "deploy v1.2.3",
@@ -156,6 +158,9 @@ func TestCreate(t *testing.T) {
 		}
 		if got.UserName != ev.UserName {
 			t.Errorf("UserName = %q, want %q", got.UserName, ev.UserName)
+		}
+		if got.UserProvider != ev.UserProvider || got.UserSubject != ev.UserSubject {
+			t.Errorf("identity = %q/%q, want %q/%q", got.UserProvider, got.UserSubject, ev.UserProvider, ev.UserSubject)
 		}
 		if !got.Timestamp.Equal(ev.Timestamp) {
 			t.Errorf("Timestamp = %v, want %v", got.Timestamp, ev.Timestamp)
@@ -188,6 +193,9 @@ func TestCreate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetByID: %v", err)
 		}
+		if stored.UserProvider != ev.UserProvider || stored.UserSubject != ev.UserSubject {
+			t.Errorf("stored identity = %q/%q, want %q/%q", stored.UserProvider, stored.UserSubject, ev.UserProvider, ev.UserSubject)
+		}
 		if len(stored.Links) != 2 || stored.Links[0].URL != ev.Links[0].URL || stored.Links[1].URL != ev.Links[1].URL {
 			t.Errorf("stored Links = %#v, want %#v", stored.Links, ev.Links)
 		}
@@ -214,6 +222,48 @@ func TestCreate(t *testing.T) {
 		}
 		if got.Tags["team"] != "frontend" {
 			t.Errorf("Tags[team] = %q, want %q", got.Tags["team"], "frontend")
+		}
+	})
+
+	t.Run("SQL-looking form values remain data", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		ts := mustTime(t, "2026-08-26T12:00:00Z")
+		payload := `value'); DROP TABLE change_events; --`
+		event := &model.ChangeEvent{
+			ID:              "sql-looking-event",
+			ExternalID:      payload,
+			UserName:        payload,
+			Timestamp:       ts,
+			EventType:       payload,
+			Description:     payload,
+			LongDescription: payload,
+			Links:           []model.EventLink{{Label: payload, URL: "https://example.com/?q=%27%3Bdrop"}},
+			Tags:            map[string]string{payload: payload},
+			CreatedAt:       ts,
+		}
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(SQL-looking values): %v", err)
+		}
+
+		stored, err := s.GetByID(t.Context(), event.ID)
+		if err != nil {
+			t.Fatalf("GetByID(SQL-looking values): %v", err)
+		}
+		if stored == nil {
+			t.Fatal("GetByID(SQL-looking values) = nil, want event")
+		}
+		if len(stored.Links) != 1 {
+			t.Fatalf("len(stored.Links) = %d, want 1", len(stored.Links))
+		}
+		if stored.Description != payload || stored.EventType != payload || stored.Tags[payload] != payload || stored.Links[0].Label != payload {
+			t.Errorf("stored SQL-looking values = %#v, want values preserved as data", stored)
+		}
+
+		probe := makeEvent("after-sql-looking-event", "alice", model.EventTypeDeployment, ts.Add(time.Minute), nil)
+		if _, err := s.Create(t.Context(), probe); err != nil {
+			t.Fatalf("Create() after SQL-looking values: %v", err)
 		}
 	})
 
@@ -366,7 +416,7 @@ func TestToggleStarIsAtomic(t *testing.T) {
 	t.Parallel()
 
 	s := newTestStore(t)
-	if _, err := s.ToggleStar(t.Context(), "missing", "alice"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.ToggleStar(t.Context(), "missing", model.UserIdentity{Name: "alice"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("ToggleStar(missing) error = %v, want %v", err, store.ErrNotFound)
 	}
 
@@ -382,7 +432,7 @@ func TestToggleStarIsAtomic(t *testing.T) {
 	for range toggles {
 		wg.Go(func() {
 			<-start
-			_, err := s.ToggleStar(t.Context(), parent.ID, "concurrent-user")
+			_, err := s.ToggleStar(t.Context(), parent.ID, model.UserIdentity{Name: "concurrent-user"})
 			errs <- err
 		})
 	}
@@ -403,7 +453,7 @@ func TestToggleStarIsAtomic(t *testing.T) {
 		t.Fatal("even number of concurrent toggles left event starred")
 	}
 
-	if _, err := s.ToggleStar(t.Context(), parent.ID, "concurrent-user"); err != nil {
+	if _, err := s.ToggleStar(t.Context(), parent.ID, model.UserIdentity{Name: "concurrent-user"}); err != nil {
 		t.Fatalf("final ToggleStar() error = %v", err)
 	}
 	annotations, err = s.GetAnnotations(t.Context(), parent.ID)
@@ -453,7 +503,7 @@ func TestToggleStarIsAtomicAcrossPools(t *testing.T) {
 		store := stores[i%len(stores)]
 		wg.Go(func() {
 			<-start
-			_, err := store.ToggleStar(ctx, parent.ID, "concurrent-user")
+			_, err := store.ToggleStar(ctx, parent.ID, model.UserIdentity{Name: "concurrent-user"})
 			errs <- err
 		})
 	}
@@ -484,14 +534,14 @@ func TestToggleAlertAppendsOppositeTransitions(t *testing.T) {
 		t.Fatalf("Create(parent) error = %v", err)
 	}
 
-	opened, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	opened, err := s.ToggleAlert(t.Context(), parent.ID, model.UserIdentity{Name: "on-call"})
 	if err != nil {
 		t.Fatalf("first ToggleAlert() error = %v", err)
 	}
 	if opened.EventType != model.EventTypeAlert || opened.ParentID != parent.ID {
 		t.Errorf("first transition = %+v", opened)
 	}
-	cleared, err := s.ToggleAlert(t.Context(), parent.ID, "on-call")
+	cleared, err := s.ToggleAlert(t.Context(), parent.ID, model.UserIdentity{Name: "on-call"})
 	if err != nil {
 		t.Fatalf("second ToggleAlert() error = %v", err)
 	}

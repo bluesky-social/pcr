@@ -28,6 +28,7 @@ type DashboardHandler struct {
 	refreshSec    int
 	dashboardTmpl *template.Template
 	detailTmpl    *template.Template
+	recordTmpl    *template.Template
 }
 
 // NewDashboardHandler parses the embedded templates and returns a ready handler.
@@ -78,6 +79,13 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 			"templates/detail.html",
 		),
 	)
+	recordTmpl := template.Must(
+		template.New("").Funcs(funcMap).ParseFS(
+			web.TemplateFS,
+			"templates/layout.html",
+			"templates/record.html",
+		),
+	)
 
 	return &DashboardHandler{
 		svc:           svc,
@@ -85,6 +93,7 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 		refreshSec:    refreshSec,
 		dashboardTmpl: dashboardTmpl,
 		detailTmpl:    detailTmpl,
+		recordTmpl:    recordTmpl,
 	}
 }
 
@@ -113,6 +122,8 @@ type dashboardEvent struct {
 // dashboardData is the template data for the dashboard page.
 type dashboardData struct {
 	RefreshSec   int
+	UserName     string
+	LogoutCSRF   string
 	CSRFToken    string
 	Events       []dashboardEvent
 	BannerEvents []model.ChangeEvent
@@ -133,12 +144,16 @@ type dashboardData struct {
 // detailData is the template data for the detail page.
 type detailData struct {
 	RefreshSec     int
+	UserName       string
+	LogoutCSRF     string
 	CSRFToken      string
 	Event          *model.ChangeEvent
 	Annotations    *model.EventAnnotations
 	Links          []model.EventLink
 	Activity       []model.ChangeEvent
 	OperationState string
+	ActionError    string
+	PendingLinks   []model.EventLink
 }
 
 // quickRanges maps the quick-select range values to durations.
@@ -186,7 +201,9 @@ func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 
 	data := dashboardData{
 		RefreshSec:   h.refreshSec,
-		CSRFToken:    middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
+		UserName:     humanUserName(r),
+		LogoutCSRF:   middleware.GenerateCSRFToken(h.sessionSecret, humanSessionNonce(r)),
+		CSRFToken:    middleware.GenerateCSRFToken(h.sessionSecret, humanSessionNonce(r)),
 		Events:       buildDashboardEvents(result.Events, annotations),
 		BannerEvents: banner.Events,
 		BannerTotal:  banner.TotalCount,
@@ -309,6 +326,10 @@ func buildDashboardEvents(events []model.ChangeEvent, annotations map[string]*mo
 
 // Detail handles GET /events/{id} and renders the event detail page.
 func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
+	h.renderDetail(w, r, http.StatusOK, "", nil)
+}
+
+func (h *DashboardHandler) renderDetail(w http.ResponseWriter, r *http.Request, status int, actionError string, pendingLinks []model.EventLink) {
 	id := chi.URLParam(r, "id")
 
 	event, err := h.svc.GetByID(r.Context(), id)
@@ -347,15 +368,22 @@ func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
 
 	data := detailData{
 		RefreshSec:     0,
-		CSRFToken:      middleware.GenerateCSRFToken(h.sessionSecret, middleware.SessionNonce(r)),
+		UserName:       humanUserName(r),
+		LogoutCSRF:     middleware.GenerateCSRFToken(h.sessionSecret, humanSessionNonce(r)),
+		CSRFToken:      middleware.GenerateCSRFToken(h.sessionSecret, humanSessionNonce(r)),
 		Event:          event,
 		Annotations:    annotations,
 		Links:          links,
 		Activity:       activity,
 		OperationState: operationState,
+		ActionError:    actionError,
+		PendingLinks:   pendingLinks,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	if err := h.detailTmpl.ExecuteTemplate(w, "layout", data); err != nil {
 		slog.ErrorContext(r.Context(), "detail template execute error", "error", err, "event_id", id)
 		http.Error(w, "Template error", http.StatusInternalServerError)
@@ -367,10 +395,15 @@ func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 	if !h.validateActionForm(w, r) {
 		return
 	}
+	user, ok := humanIdentity(r)
+	if !ok {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
 
 	id := chi.URLParam(r, "id")
 
-	_, err := h.svc.ToggleStar(r.Context(), id, "dashboard-user")
+	event, err := h.svc.ToggleStarAs(r.Context(), id, user)
 	if err != nil {
 		if errors.Is(err, service.ErrEventNotFound) {
 			http.Error(w, "Event not found", http.StatusNotFound)
@@ -380,6 +413,7 @@ func (h *DashboardHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	logHumanAction(r, "toggle_star", user, event.ID)
 
 	redirectAfterAction(w, r)
 }
@@ -389,11 +423,17 @@ func (h *DashboardHandler) ToggleAlert(w http.ResponseWriter, r *http.Request) {
 	if !h.validateActionForm(w, r) {
 		return
 	}
-	_, err := h.svc.ToggleAlert(r.Context(), chi.URLParam(r, "id"), "dashboard-user")
+	user, ok := humanIdentity(r)
+	if !ok {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
+	event, err := h.svc.ToggleAlertAs(r.Context(), chi.URLParam(r, "id"), user)
 	if err != nil {
 		h.writeActionError(w, r, err, "toggle alert")
 		return
 	}
+	logHumanAction(r, "toggle_alert", user, event.ID)
 	redirectAfterAction(w, r)
 }
 
@@ -402,12 +442,26 @@ func (h *DashboardHandler) AddLinks(w http.ResponseWriter, r *http.Request) {
 	if !h.validateActionForm(w, r) {
 		return
 	}
+	user, ok := humanIdentity(r)
+	if !ok {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
 	links := parseLinkForm(r.PostForm)
-	_, err := h.svc.AddLinks(r.Context(), chi.URLParam(r, "id"), "dashboard-user", links)
+	event, err := h.svc.AddLinksAs(r.Context(), chi.URLParam(r, "id"), user, links)
 	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrLinksRequired):
+			h.renderDetail(w, r, http.StatusBadRequest, "Add at least one link.", links)
+			return
+		case errors.Is(err, service.ErrInvalidLink):
+			h.renderDetail(w, r, http.StatusBadRequest, invalidLinkMessage, links)
+			return
+		}
 		h.writeActionError(w, r, err, "add links")
 		return
 	}
+	logHumanAction(r, "add_links", user, event.ID, "link_count", len(links))
 	redirectAfterAction(w, r)
 }
 
@@ -416,28 +470,71 @@ func (h *DashboardHandler) CloseOperation(w http.ResponseWriter, r *http.Request
 	if !h.validateActionForm(w, r) {
 		return
 	}
-	_, err := h.svc.CloseOperation(
+	user, ok := humanIdentity(r)
+	if !ok {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
+	event, err := h.svc.CloseOperationAs(
 		r.Context(),
 		chi.URLParam(r, "id"),
-		"dashboard-user",
+		user,
 		r.PostFormValue("description"),
 	)
 	if err != nil {
 		h.writeActionError(w, r, err, "close operation")
 		return
 	}
+	logHumanAction(r, "close_operation", user, event.ID)
 	redirectAfterAction(w, r)
+}
+
+func logHumanAction(r *http.Request, action string, user model.UserIdentity, eventID string, attrs ...any) {
+	fields := []any{
+		"action", action,
+		"event_id", eventID,
+		"parent_event_id", chi.URLParam(r, "id"),
+		"provider", user.Provider,
+		"subject", user.Subject,
+		"user_name", user.Name,
+	}
+	fields = append(fields, attrs...)
+	slog.InfoContext(r.Context(), "human dashboard action succeeded", fields...)
 }
 
 func (h *DashboardHandler) validateActionForm(w http.ResponseWriter, r *http.Request) bool {
 	if !parseBoundedPostForm(w, r) {
 		return false
 	}
-	if !middleware.ValidateCSRFToken(h.sessionSecret, middleware.SessionNonce(r), r.PostFormValue("csrf_token")) {
+	if !middleware.ValidateCSRFToken(h.sessionSecret, humanSessionNonce(r), r.PostFormValue("csrf_token")) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return false
 	}
 	return true
+}
+
+func humanSessionNonce(r *http.Request) string {
+	session, ok := middleware.HumanSessionFromContext(r.Context())
+	if !ok {
+		return ""
+	}
+	return session.Nonce
+}
+
+func humanUserName(r *http.Request) string {
+	session, ok := middleware.HumanSessionFromContext(r.Context())
+	if !ok {
+		return ""
+	}
+	return session.UserName
+}
+
+func humanIdentity(r *http.Request) (model.UserIdentity, bool) {
+	session, ok := middleware.HumanSessionFromContext(r.Context())
+	if !ok || !session.IsValid() {
+		return model.UserIdentity{}, false
+	}
+	return model.UserIdentity{Name: session.UserName, Provider: session.Provider, Subject: session.Subject}, true
 }
 
 func (h *DashboardHandler) writeActionError(w http.ResponseWriter, r *http.Request, err error, action string) {

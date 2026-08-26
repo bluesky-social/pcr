@@ -2,12 +2,107 @@
 
 Three container deployment methods, in order of simplicity. For direct binary setup during development, see the manual setup in [testing.md](testing.md).
 
+## Human identity provider
+
+Every installation selects exactly one dashboard provider. GitHub, Google, and direct Authentik modes require an OAuth web application whose callback is the canonical public origin plus `/auth/callback`; Beyond mode uses trusted proxy headers instead.
+
+GitHub company restriction:
+
+```text
+PCR_HUMAN_AUTH_PROVIDER=github
+PCR_ALLOWED_ORGS=example-inc,example-subsidiary
+```
+
+PCR requests `read:user` and `read:org`, fetches the authenticated profile, and accepts only active membership in one configured organization. Organizations enforcing SAML SSO or OAuth-application restrictions may require an administrator to approve the OAuth application or authorize it for the organization.
+
+Google company restriction:
+
+```text
+PCR_HUMAN_AUTH_PROVIDER=google
+PCR_ALLOWED_ORGS=example.com,subsidiary.example.com
+```
+
+Create an OAuth web client on the Google consent screen. PCR validates the ID-token signature, issuer, audience, expiration, nonce, verified email, and exact signed `hd` Workspace-domain claim. The account chooser's `hd` parameter is only a hint. Consumer accounts without a Workspace hosted domain and suffix lookalikes are denied.
+
+Authentik group restriction:
+
+```text
+PCR_HUMAN_AUTH_PROVIDER=authentik
+PCR_OIDC_ISSUER_URL=https://auth.example.com/application/o/pcr/
+PCR_ALLOWED_ORGS=Platform Operators,Production Readers
+```
+
+Create an Authentik OAuth2/OpenID provider and application using a confidential client, authorization-code flow, and the callback `<PCR_PUBLIC_URL>/auth/callback`. Use Authentik's [recommended per-provider issuer mode](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/); this PCR integration does not support global issuer mode because Authentik continues to publish discovery beneath the application slug. Attach scope mappings for `openid`, `email`, `profile`, and `groups`, and ensure the resulting signed ID token contains `sub`, `nonce`, `preferred_username` (or a verified email), and a string-array `groups` claim. Group matching is exact and case-sensitive. Authentik application access policies can restrict entry before PCR applies its own configured group or subject policy. An individual exception uses the issuer-scoped form `authentik:<issuer>:<sub>`.
+
+Beyond trusted-proxy restriction:
+
+```text
+PCR_HUMAN_AUTH_PROVIDER=beyond
+PCR_ALLOWED_ORGS=Platform Operators,Production Readers
+```
+
+This follows the same pattern as an application using Grafana `auth.proxy`.
+Beyond authenticates the browser and injects `X-Beyond-Email`,
+`X-Beyond-Name`, and `X-Beyond-Groups`; PCR rechecks the configured groups and
+binds its local CSRF session to the verified email on every request. PCR OAuth
+client credentials and `/auth/callback` are unused in this mode.
+
+Add PCR to Beyond and let opaque PCR API credentials bypass edge login using
+the non-Bearer scheme that PCR validates itself:
+
+```yaml
+applications:
+  pcr:
+    upstream: http://pcr-server.pcr.svc.cluster.local:8080
+    host: changes.example.com
+    allowed_groups: [example-group]
+    passthrough_auth_schemes: [Token]
+```
+
+External API clients then send `Authorization: Token <PCR-token>`. Beyond
+strips any caller-supplied `X-Beyond-*` values and forwards the credential;
+PCR remains the API authentication boundary. `Bearer` continues to work when
+calling PCR directly, but a sessionless Bearer request through Beyond is
+reserved for Beyond's OIDC JWT handling.
+
+Header trust requires network isolation. Do not expose PCR through another
+Ingress, LoadBalancer, NodePort, or generally reachable ClusterIP path. Apply a
+NetworkPolicy permitting the application port from Beyond's namespace/pods and
+only explicitly required probes or administrative sources. A forged-header
+request that can reach PCR directly has the same authority as Beyond.
+
+The checked-in standalone manifests provide this boundary in
+`k8s/networkpolicy-beyond.yaml`. Apply it whenever
+`PCR_HUMAN_AUTH_PROVIDER=beyond`; do not apply that provider-specific policy to
+a direct GitHub, Google, or Authentik deployment. Its selectors match the
+standalone `app: pcr-server` pods and the company Beyond deployment's
+`app.kubernetes.io/name: beyond` pods. Adapt the PCR selector if the installer
+uses a different chart label. The Deployment uses loopback exec probes so
+kubelet health checks do not require another NetworkPolicy ingress exception.
+
+Beyond's current identity contract uses verified email rather than OIDC `sub`.
+PCR therefore stores `user_provider=beyond` and the lowercased email as
+`user_subject`. Display-name changes preserve identity; an email change creates
+a new identity and does not rewrite historical events. Logout clears PCR's
+local session but does not terminate the user's Beyond or Authentik SSO session.
+
+Multiple values have OR semantics. `PCR_HUMAN_AUTH_ALLOWED_SUBJECTS` can add stable individual exceptions; leave it empty for strictly company-only access. `PCR_HUMAN_AUTH_ALLOW_ANY=true` is intended only when company restriction is deliberately disabled and cannot be combined with either restriction.
+
+OAuth-provider identity and membership are checked when a PCR session is
+established, so normal dashboard requests make no provider calls. The check is
+refreshed after the absolute `PCR_HUMAN_SESSION_DURATION` window. Beyond mode
+instead rechecks the proxy identity and groups on every protected request.
+Logout validates only the signed local session and CSRF token so a user whose
+group was revoked can still clear the unusable cookie; it does not make a
+provider call or terminate the upstream SSO session.
+
 ## 1. Docker (single container)
 
 ### Prerequisites
 - Docker
 - Colima, Docker Desktop, or another Docker daemon
 - A reachable PostgreSQL database and connection URL
+- A GitHub OAuth application, Google OAuth web client, or Authentik OAuth2/OpenID application with callback `<public-url>/auth/callback`; alternatively, an existing Beyond deployment and an isolated upstream network path
 
 ### Build the image
 
@@ -21,11 +116,18 @@ make docker-build
 ```bash
 export PCR_SESSION_SECRET="$(openssl rand -base64 48)"
 export PCR_DATABASE_URL="postgres://pcr:password@postgres.example.internal:5432/pcr?sslmode=require"
+export PCR_OAUTH_CLIENT_ID="your-github-client-id"
+export PCR_OAUTH_CLIENT_SECRET="your-github-client-secret"
 docker run -d --name pcr-server \
   -p 8080:8080 \
   -e PCR_API_TOKENS=my-secret-token \
   -e PCR_SESSION_SECRET \
   -e PCR_DATABASE_URL \
+  -e PCR_HUMAN_AUTH_PROVIDER=github \
+  -e PCR_PUBLIC_URL=http://localhost:8080 \
+  -e PCR_OAUTH_CLIENT_ID \
+  -e PCR_OAUTH_CLIENT_SECRET \
+  -e PCR_HUMAN_AUTH_ALLOW_ANY=true \
   -e PCR_COOKIE_SECURE=false \
   pcr-server
 ```
@@ -55,7 +157,7 @@ curl -s -H "Authorization: Bearer my-secret-token" \
   "http://localhost:8080/api/v1/events?top_level=true" | jq '.total_count'
 
 # Open dashboard in browser
-# Open the login form and enter the token
+# Open the login form and use the configured provider
 open "http://localhost:8080/login"
 ```
 
@@ -75,13 +177,18 @@ docker stop pcr-server && docker rm pcr-server
 Compose starts PostgreSQL and persists it in the `postgres-data` volume.
 
 ```bash
-PCR_API_TOKENS=my-secret-token docker compose up -d --build
+PCR_API_TOKENS=my-secret-token \
+PCR_OAUTH_CLIENT_ID=your-github-client-id \
+PCR_OAUTH_CLIENT_SECRET=your-github-client-secret \
+docker compose up -d --build
 ```
 
 Or set the env var in a `.env` file (not committed to git):
 ```
 PCR_API_TOKENS=my-secret-token
 PCR_SESSION_SECRET=replace-with-32-byte-secret-from-openssl-rand
+PCR_OAUTH_CLIENT_ID=your-github-client-id
+PCR_OAUTH_CLIENT_SECRET=your-github-client-secret
 ```
 
 Then just:
@@ -103,7 +210,7 @@ curl -s -X POST -H "Authorization: Bearer my-secret-token" \
   "event_type": "feature-flag",
   "description": "compose sanity check"
 }' | jq '{id, description}'
-# Open the login form and enter the token
+# Open the login form and use the configured provider
 open "http://localhost:8080/login"
 ```
 
@@ -152,9 +259,11 @@ stringData:
   api-tokens: "your-actual-token"
   session-secret: "a-random-secret-of-at-least-32-bytes"
   database-url: "postgres://pcr:password@postgres.example.internal:5432/pcr?sslmode=require"
+  oauth-client-id: "your-provider-client-id"
+  oauth-client-secret: "your-provider-client-secret"
 ```
 
-The checked-in placeholders are not deployment credentials, and the placeholder session secret is too short for the server to accept. Replace all values before applying the manifests. The PostgreSQL host must be reachable from the `pcr` namespace.
+Edit `k8s/configmap.yaml` as well: select `github`, `google`, `authentik`, or `beyond`; set `PCR_PUBLIC_URL` to the HTTPS origin; and set `PCR_ALLOWED_ORGS` to GitHub organizations, Google Workspace domains, or exact Authentik/Beyond groups. Authentik also requires `PCR_OIDC_ISSUER_URL`; Beyond requires the documented proxy-only network path. The checked-in placeholders are not deployment credentials, and the placeholder session secret is too short for the server to accept. Replace all values before applying the manifests. The PostgreSQL host must be reachable from the `pcr` namespace.
 
 ### Apply manifests
 
@@ -164,7 +273,14 @@ kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
+
+# Required only when PCR_HUMAN_AUTH_PROVIDER=beyond:
+kubectl apply -f k8s/networkpolicy-beyond.yaml
 ```
+
+Do not expose a Beyond-mode deployment until the NetworkPolicy is applied and
+verified. A CNI that does not enforce Kubernetes NetworkPolicy cannot safely
+host this trusted-header mode without an equivalent network control.
 
 ### Verify the pod is running
 
@@ -205,9 +321,9 @@ curl -s -X POST -H "Authorization: Bearer your-actual-token" \
 curl -s -H "Authorization: Bearer your-actual-token" \
   "http://localhost:8080/api/v1/events?top_level=true" | jq '.total_count'
 
-# Dashboard through the backwards-compatible query-token flow. This is suitable
-# only for local testing; prefer HTTPS and the /login form in a real deployment.
-open "http://localhost:8080/?token=your-actual-token"
+# For port-forward-only development, register http://localhost:8080/auth/callback,
+# set PCR_PUBLIC_URL accordingly, and set PCR_COOKIE_SECURE=false before applying.
+open "http://localhost:8080/login"
 ```
 
 ### Tear down
@@ -223,6 +339,15 @@ All methods use the same environment variables. Key settings:
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PCR_API_TOKENS` | Yes | -- | Comma-separated API tokens |
+| `PCR_HUMAN_AUTH_PROVIDER` | Yes | -- | Exactly one of `github`, `google`, `authentik`, or `beyond` |
+| `PCR_PUBLIC_URL` | Yes | -- | Canonical external origin; OAuth provider callback is `<value>/auth/callback` |
+| `PCR_OAUTH_CLIENT_ID` | Except Beyond | -- | Selected provider's OAuth client ID |
+| `PCR_OAUTH_CLIENT_SECRET` | Except Beyond | -- | Selected provider's OAuth client secret |
+| `PCR_OIDC_ISSUER_URL` | Authentik only | -- | Recommended Authentik per-provider issuer ending in `/application/o/<slug>/` |
+| `PCR_ALLOWED_ORGS` | Conditional | -- | GitHub organizations, Google Workspace domains, or exact Authentik/Beyond group names |
+| `PCR_HUMAN_AUTH_ALLOWED_SUBJECTS` | Conditional | -- | Stable provider subjects allowed as individual exceptions |
+| `PCR_HUMAN_AUTH_ALLOW_ANY` | No | `false` | Allow any provider identity; mutually exclusive with restrictions |
+| `PCR_HUMAN_SESSION_DURATION` | No | `12h` | Absolute provider-policy freshness and session window |
 | `PCR_SESSION_SECRET` | No | (random 32-byte) | HMAC key for session cookies. Must be at least 32 bytes when set; generate via `openssl rand -base64 48`. Set for persistent sessions across restarts. |
 | `PCR_DATABASE_URL` | Yes | -- | PostgreSQL connection URL; require TLS outside local development |
 | `PCR_AUTO_MIGRATE` | No | `true` | Run schema migrations on startup |

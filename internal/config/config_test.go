@@ -17,6 +17,15 @@ const validSessionSecret = "0123456789abcdef0123456789abcdef"
 func TestLoad(t *testing.T) {
 	// NOT parallel — t.Setenv is incompatible with t.Parallel().
 	t.Setenv("PCR_DATABASE_URL", "postgres://pcr@postgres.example/pcr?sslmode=require")
+	t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "github")
+	t.Setenv("PCR_PUBLIC_URL", "https://changes.example.com")
+	t.Setenv("PCR_OAUTH_CLIENT_ID", "test-client-id")
+	t.Setenv("PCR_OAUTH_CLIENT_SECRET", "test-client-secret")
+	t.Setenv("PCR_OIDC_ISSUER_URL", "")
+	t.Setenv("PCR_ALLOWED_ORGS", "")
+	t.Setenv("PCR_HUMAN_AUTH_ALLOWED_SUBJECTS", "")
+	t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "true")
+	t.Setenv("PCR_HUMAN_SESSION_DURATION", "")
 
 	// clearOptionalEnv blanks all optional PCR_ env vars so tests
 	// are not affected by host environment variables.
@@ -32,6 +41,15 @@ func TestLoad(t *testing.T) {
 		} {
 			t.Setenv(key, "")
 		}
+		t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "github")
+		t.Setenv("PCR_PUBLIC_URL", "https://changes.example.com")
+		t.Setenv("PCR_OAUTH_CLIENT_ID", "test-client-id")
+		t.Setenv("PCR_OAUTH_CLIENT_SECRET", "test-client-secret")
+		t.Setenv("PCR_OIDC_ISSUER_URL", "")
+		t.Setenv("PCR_ALLOWED_ORGS", "")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOWED_SUBJECTS", "")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "true")
+		t.Setenv("PCR_HUMAN_SESSION_DURATION", "")
 	}
 
 	t.Run("minimum valid config uses all defaults", func(t *testing.T) {
@@ -85,6 +103,159 @@ func TestLoad(t *testing.T) {
 		}
 		if cfg.DBSlowQueryThreshold != 100*time.Millisecond {
 			t.Errorf("DBSlowQueryThreshold = %v, want 100ms", cfg.DBSlowQueryThreshold)
+		}
+		if cfg.HumanAuthProvider != "github" {
+			t.Errorf("HumanAuthProvider = %q, want github", cfg.HumanAuthProvider)
+		}
+		if cfg.PublicURL != "https://changes.example.com" {
+			t.Errorf("PublicURL = %q, want https://changes.example.com", cfg.PublicURL)
+		}
+		if cfg.HumanSessionDuration != 12*time.Hour {
+			t.Errorf("HumanSessionDuration = %v, want 12h", cfg.HumanSessionDuration)
+		}
+		if !cfg.HumanAuthAllowAny {
+			t.Error("HumanAuthAllowAny = false, want true")
+		}
+	})
+
+	t.Run("google organization domains and subjects are normalized", func(t *testing.T) {
+		clearOptionalEnv(t)
+		t.Setenv("PCR_API_TOKENS", "tok1")
+		t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "google")
+		t.Setenv("PCR_ALLOWED_ORGS", " Example.COM, subsidiary.example.com ")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOWED_SUBJECTS", "google:123, google:456")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "false")
+		t.Setenv("PCR_HUMAN_SESSION_DURATION", "8h")
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got, want := strings.Join(cfg.AllowedOrgs, ","), "example.com,subsidiary.example.com"; got != want {
+			t.Errorf("AllowedOrgs = %q, want %q", got, want)
+		}
+		if got, want := strings.Join(cfg.HumanAuthAllowedSubjects, ","), "google:123,google:456"; got != want {
+			t.Errorf("HumanAuthAllowedSubjects = %q, want %q", got, want)
+		}
+		if cfg.HumanSessionDuration != 8*time.Hour {
+			t.Errorf("HumanSessionDuration = %v, want 8h", cfg.HumanSessionDuration)
+		}
+	})
+
+	t.Run("authentik preserves exact group names and validates issuer", func(t *testing.T) {
+		clearOptionalEnv(t)
+		t.Setenv("PCR_API_TOKENS", "tok1")
+		t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "authentik")
+		t.Setenv("PCR_OIDC_ISSUER_URL", "https://auth.example.com/application/o/pcr/")
+		t.Setenv("PCR_ALLOWED_ORGS", "Platform Operators,Production-Readers")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOWED_SUBJECTS", "authentik:https://auth.example.com/application/o/pcr/:user-123")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "false")
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got, want := cfg.OIDCIssuerURL, "https://auth.example.com/application/o/pcr/"; got != want {
+			t.Errorf("OIDCIssuerURL = %q, want %q", got, want)
+		}
+		if got, want := strings.Join(cfg.AllowedOrgs, ","), "Platform Operators,Production-Readers"; got != want {
+			t.Errorf("AllowedOrgs = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("beyond uses exact groups without PCR OAuth credentials", func(t *testing.T) {
+		clearOptionalEnv(t)
+		t.Setenv("PCR_API_TOKENS", "tok1")
+		t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "beyond")
+		t.Setenv("PCR_OAUTH_CLIENT_ID", "")
+		t.Setenv("PCR_OAUTH_CLIENT_SECRET", "")
+		t.Setenv("PCR_ALLOWED_ORGS", "Platform Operators,Production-Readers")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "false")
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if cfg.HumanAuthProvider != "beyond" {
+			t.Errorf("HumanAuthProvider = %q, want beyond", cfg.HumanAuthProvider)
+		}
+		if got, want := strings.Join(cfg.AllowedOrgs, ","), "Platform Operators,Production-Readers"; got != want {
+			t.Errorf("AllowedOrgs = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("invalid human authentication configuration fails closed", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			key   string
+			value string
+		}{
+			{name: "missing provider", key: "PCR_HUMAN_AUTH_PROVIDER", value: ""},
+			{name: "unknown provider", key: "PCR_HUMAN_AUTH_PROVIDER", value: "gitlab"},
+			{name: "missing public URL", key: "PCR_PUBLIC_URL", value: ""},
+			{name: "public URL has query", key: "PCR_PUBLIC_URL", value: "https://changes.example.com?next=evil"},
+			{name: "insecure non-loopback public URL", key: "PCR_PUBLIC_URL", value: "http://changes.example.com"},
+			{name: "missing client ID", key: "PCR_OAUTH_CLIENT_ID", value: ""},
+			{name: "missing client secret", key: "PCR_OAUTH_CLIENT_SECRET", value: ""},
+			{name: "nonpositive session duration", key: "PCR_HUMAN_SESSION_DURATION", value: "0s"},
+			{name: "unreasonably long session duration", key: "PCR_HUMAN_SESSION_DURATION", value: "168h1m"},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				clearOptionalEnv(t)
+				t.Setenv("PCR_API_TOKENS", "tok1")
+				t.Setenv(tc.key, tc.value)
+
+				_, err := config.Load()
+				if err == nil {
+					t.Fatalf("Load() error = nil, want %s error", tc.key)
+				}
+				if !strings.Contains(err.Error(), tc.key) {
+					t.Errorf("Load() error = %q, want %s context", err, tc.key)
+				}
+			})
+		}
+	})
+
+	t.Run("authentik issuer configuration fails closed", func(t *testing.T) {
+		tests := []string{
+			"",
+			"https://auth.example.com/",
+			"https://auth.example.com/application/o/pcr",
+			"http://auth.example.com/application/o/pcr/",
+			"https://auth.example.com/application/o/pcr/?query=bad",
+		}
+		for _, issuer := range tests {
+			t.Run(issuer, func(t *testing.T) {
+				clearOptionalEnv(t)
+				t.Setenv("PCR_API_TOKENS", "tok1")
+				t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "authentik")
+				t.Setenv("PCR_OIDC_ISSUER_URL", issuer)
+
+				_, err := config.Load()
+				if err == nil || !strings.Contains(err.Error(), "PCR_OIDC_ISSUER_URL") {
+					t.Errorf("Load() error = %v, want PCR_OIDC_ISSUER_URL error", err)
+				}
+			})
+		}
+	})
+
+	t.Run("authorization policy is explicit", func(t *testing.T) {
+		clearOptionalEnv(t)
+		t.Setenv("PCR_API_TOKENS", "tok1")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "false")
+
+		_, err := config.Load()
+		if err == nil || !strings.Contains(err.Error(), "PCR_ALLOWED_ORGS") {
+			t.Fatalf("Load() error = %v, want missing authorization policy error", err)
+		}
+
+		t.Setenv("PCR_ALLOWED_ORGS", "example")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "true")
+		_, err = config.Load()
+		if err == nil || !strings.Contains(err.Error(), "PCR_HUMAN_AUTH_ALLOW_ANY") {
+			t.Fatalf("Load() error = %v, want contradictory policy error", err)
 		}
 	})
 

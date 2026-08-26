@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/sarah/go-prod-change-registry/internal/model"
@@ -20,7 +18,7 @@ type testCase struct {
 }
 
 // fixture carries state between cases that depend on each other (created
-// IDs, login session). It is reset to a zero value at the start of each
+// IDs). It is reset to a zero value at the start of each
 // run so cases are deterministic across invocations.
 type fixture struct {
 	parentEventID      string
@@ -55,9 +53,6 @@ func allCases() []testCase {
 		{"create_alert_meta_event", caseCreateAlert},
 		{"list_filter_alerted_only", caseListFilterAlerted},
 		{"login_form_renders", caseLoginFormRenders},
-		{"login_post_sets_session_cookie", caseLoginPostCookie},
-		{"login_oversized_body_returns_413", caseLoginOversizedBody},
-		{"dashboard_with_session_cookie_renders", caseDashboardWithCookie},
 	}
 }
 
@@ -480,85 +475,8 @@ func caseLoginFormRenders(ctx context.Context, c *client, _ *fixture) error {
 	if err := expectStatus(r, http.StatusOK); err != nil {
 		return err
 	}
-	if !strings.Contains(string(r.Body), `name="token"`) {
-		return fmt.Errorf("login form missing token input")
+	if !strings.Contains(string(r.Body), "Sign in with GitHub") {
+		return fmt.Errorf("login form missing configured provider button")
 	}
 	return nil
-}
-
-func caseLoginPostCookie(ctx context.Context, c *client, _ *fixture) error {
-	form := url.Values{"token": {c.token}}
-	r, err := c.postForm(ctx, "/login", form, withAuth(authNone))
-	if err != nil {
-		return err
-	}
-	// Login redirects to / on success; the http.Client default follows the
-	// redirect, so we'll see the dashboard 200 here. Either way, the cookie
-	// must have been set on the jar.
-	if r.Status != http.StatusOK && r.Status != http.StatusSeeOther {
-		return fmt.Errorf("expected 200 or 303 after login, got %d (body: %s)", r.Status, truncate(r.Body, 200))
-	}
-	if !sessionCookieSet(c) {
-		return fmt.Errorf("session cookie not set after login")
-	}
-	return nil
-}
-
-func caseLoginOversizedBody(ctx context.Context, c *client, _ *fixture) error {
-	// 16 KiB body (well above the 8 KiB cap in parseBoundedPostForm).
-	huge := "token=" + strings.Repeat("a", 16<<10)
-	r, err := c.do(ctx, http.MethodPost, "/login",
-		strings.NewReader(huge),
-		withAuth(authNone),
-		withContentType("application/x-www-form-urlencoded"),
-	)
-	if err != nil {
-		return err
-	}
-	return expectStatus(r, http.StatusRequestEntityTooLarge)
-}
-
-func caseDashboardWithCookie(ctx context.Context, c *client, _ *fixture) error {
-	if !sessionCookieSet(c) {
-		return fmt.Errorf("skipped: no session cookie (login must run first)")
-	}
-	// authNone -> rely on the cookie jar. The Auth middleware accepts
-	// session cookies even without a Bearer header.
-	r, err := c.do(ctx, http.MethodGet, "/", nil, withAuth(authNone))
-	if err != nil {
-		return err
-	}
-	if err := expectStatus(r, http.StatusOK); err != nil {
-		return err
-	}
-	body := string(r.Body)
-	if !strings.Contains(body, "<html") {
-		return fmt.Errorf("dashboard response does not look like HTML (first 200 bytes: %s)", truncate(r.Body, 200))
-	}
-	// Sanity check: dashboard renders a CSRF token for star forms.
-	if !csrfTokenPresent(body) {
-		return fmt.Errorf("dashboard HTML missing csrf_token input")
-	}
-	return nil
-}
-
-// --- helpers ---
-
-var csrfInputRE = regexp.MustCompile(`name="csrf_token"\s+value="[^"]+"`)
-
-func csrfTokenPresent(html string) bool {
-	return csrfInputRE.MatchString(html)
-}
-
-func sessionCookieSet(c *client) bool {
-	u, err := url.Parse(c.baseURL)
-	if err != nil {
-		return false
-	}
-	for _, cookie := range c.http.Jar.Cookies(u) {
-		if cookie.Name == "pcr_session" && cookie.Value != "" {
-			return true
-		}
-	}
-	return false
 }

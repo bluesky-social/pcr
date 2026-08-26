@@ -21,6 +21,8 @@ type mockStore struct {
 	createFn              func(ctx context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error)
 	toggleStarFn          func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
 	toggleAlertFn         func(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error)
+	toggleStarIdentityFn  func(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error)
+	toggleAlertIdentityFn func(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error)
 	getByIDFn             func(ctx context.Context, id string) (*model.ChangeEvent, error)
 	listFn                func(ctx context.Context, params model.ListParams) (*model.ListResult, error)
 	listCurrentFn         func(ctx context.Context, params model.CurrentParams) (*model.ListResult, error)
@@ -35,18 +37,24 @@ func (m *mockStore) Create(ctx context.Context, event *model.ChangeEvent) (*mode
 	return m.createFn(ctx, event)
 }
 
-func (m *mockStore) ToggleStar(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+func (m *mockStore) ToggleStar(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
+	if m.toggleStarIdentityFn != nil {
+		return m.toggleStarIdentityFn(ctx, eventID, user)
+	}
 	if m.toggleStarFn == nil {
 		panic("unexpected call to ToggleStar")
 	}
-	return m.toggleStarFn(ctx, eventID, userName)
+	return m.toggleStarFn(ctx, eventID, user.Name)
 }
 
-func (m *mockStore) ToggleAlert(ctx context.Context, eventID, userName string) (*model.ChangeEvent, error) {
+func (m *mockStore) ToggleAlert(ctx context.Context, eventID string, user model.UserIdentity) (*model.ChangeEvent, error) {
+	if m.toggleAlertIdentityFn != nil {
+		return m.toggleAlertIdentityFn(ctx, eventID, user)
+	}
 	if m.toggleAlertFn == nil {
 		panic("unexpected call to ToggleAlert")
 	}
-	return m.toggleAlertFn(ctx, eventID, userName)
+	return m.toggleAlertFn(ctx, eventID, user.Name)
 }
 
 func (m *mockStore) GetByID(ctx context.Context, id string) (*model.ChangeEvent, error) {

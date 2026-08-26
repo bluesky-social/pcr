@@ -20,8 +20,8 @@ type authErrorDetail struct {
 	Message string `json:"message"`
 }
 
-// Auth returns middleware that validates Bearer tokens from the Authorization header,
-// session cookies, or query parameter tokens. The tokens slice contains the list of
+// Auth returns middleware that validates Bearer or Token credentials from the
+// Authorization header, session cookies, or query parameter tokens. The tokens slice contains the list of
 // valid tokens. If requireForReads is false, GET and HEAD requests are allowed without
 // authentication. The sessionSecret is used to validate session cookies.
 // Cognitive complexity is in the auth-method fallback chain (bearer header,
@@ -44,8 +44,9 @@ func Auth(tokens []string, requireForReads bool, sessionSecret []byte) func(http
 				return
 			}
 
-			// Check Bearer token.
-			token := extractBearerToken(r)
+			// Check an explicit API credential. Token is supported for deployments
+			// behind authentication proxies that reserve Bearer for OIDC JWTs.
+			token := extractAPIToken(r)
 			if token != "" && ValidateToken([]byte(token), validTokens) {
 				next.ServeHTTP(w, r)
 				return
@@ -91,11 +92,13 @@ func ValidateToken(provided []byte, validTokens [][]byte) bool {
 	return false
 }
 
-// extractBearerToken pulls the token from an "Authorization: Bearer <token>" header.
-func extractBearerToken(r *http.Request) string {
-	const prefix = "Bearer "
-	if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), prefix); ok {
-		return token
+// extractAPIToken pulls an opaque application token from an Authorization header.
+func extractAPIToken(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	for _, prefix := range []string{"Bearer ", "Token "} {
+		if token, ok := strings.CutPrefix(header, prefix); ok {
+			return token
+		}
 	}
 	return ""
 }

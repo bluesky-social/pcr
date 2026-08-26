@@ -42,6 +42,8 @@ func NewLoginHandler(tokens []string, sessionOpts middleware.SessionOptions) *Lo
 type loginData struct {
 	RefreshSec int
 	Error      string
+	UserName   string
+	LogoutCSRF string
 }
 
 // ShowLoginForm renders the login form (GET /login).

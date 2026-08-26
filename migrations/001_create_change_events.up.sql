@@ -4,6 +4,8 @@ CREATE TABLE change_events (
     external_id      TEXT,
     parent_id        TEXT REFERENCES change_events(id),
     user_name        TEXT NOT NULL,
+    user_provider    TEXT,
+    user_subject     TEXT,
     timestamp        TIMESTAMPTZ NOT NULL,
     event_type       TEXT NOT NULL DEFAULT '',
     description      TEXT NOT NULL DEFAULT '',
@@ -14,6 +16,7 @@ CREATE TABLE change_events (
 CREATE INDEX idx_change_events_timestamp ON change_events (timestamp DESC, id ASC);
 CREATE INDEX idx_change_events_event_type ON change_events (event_type);
 CREATE INDEX idx_change_events_user_name ON change_events (user_name);
+CREATE INDEX idx_change_events_user_identity ON change_events (user_provider, user_subject);
 CREATE INDEX idx_change_events_parent_id ON change_events (parent_id);
 CREATE INDEX idx_change_events_parent_transition ON change_events (parent_id, event_type, ingest_sequence DESC);
 CREATE UNIQUE INDEX idx_change_events_external_id ON change_events (external_id) WHERE external_id IS NOT NULL;
