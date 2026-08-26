@@ -225,6 +225,48 @@ func TestCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("SQL-looking form values remain data", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestStore(t)
+		ts := mustTime(t, "2026-08-26T12:00:00Z")
+		payload := `value'); DROP TABLE change_events; --`
+		event := &model.ChangeEvent{
+			ID:              "sql-looking-event",
+			ExternalID:      payload,
+			UserName:        payload,
+			Timestamp:       ts,
+			EventType:       payload,
+			Description:     payload,
+			LongDescription: payload,
+			Links:           []model.EventLink{{Label: payload, URL: "https://example.com/?q=%27%3Bdrop"}},
+			Tags:            map[string]string{payload: payload},
+			CreatedAt:       ts,
+		}
+		if _, err := s.Create(t.Context(), event); err != nil {
+			t.Fatalf("Create(SQL-looking values): %v", err)
+		}
+
+		stored, err := s.GetByID(t.Context(), event.ID)
+		if err != nil {
+			t.Fatalf("GetByID(SQL-looking values): %v", err)
+		}
+		if stored == nil {
+			t.Fatal("GetByID(SQL-looking values) = nil, want event")
+		}
+		if len(stored.Links) != 1 {
+			t.Fatalf("len(stored.Links) = %d, want 1", len(stored.Links))
+		}
+		if stored.Description != payload || stored.EventType != payload || stored.Tags[payload] != payload || stored.Links[0].Label != payload {
+			t.Errorf("stored SQL-looking values = %#v, want values preserved as data", stored)
+		}
+
+		probe := makeEvent("after-sql-looking-event", "alice", model.EventTypeDeployment, ts.Add(time.Minute), nil)
+		if _, err := s.Create(t.Context(), probe); err != nil {
+			t.Fatalf("Create() after SQL-looking values: %v", err)
+		}
+	})
+
 	t.Run("meta-event with parent_id", func(t *testing.T) {
 		t.Parallel()
 

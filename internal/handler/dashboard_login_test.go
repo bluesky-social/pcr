@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -80,6 +81,8 @@ func newDashboardTestStack() *dashboardStack {
 	})
 	r.Use(middleware.RequireHumanAuth(dashboardSessionSecret, "github"))
 	r.Get("/", h.Dashboard)
+	r.Get("/events/new", h.ShowCreateEvent)
+	r.Post("/events", h.CreateEvent)
 	r.Get("/events/{id}", h.Detail)
 	r.Post("/events/{id}/star", h.ToggleStar)
 	r.Post("/events/{id}/alert", h.ToggleAlert)
@@ -700,6 +703,8 @@ func TestDetail(t *testing.T) {
 			"Activity",
 			`action="/events/evt-detail-001/links"`,
 			`action="/events/evt-detail-001/alert"`,
+			`data-add-links-form`,
+			`src="/static/form-validation.js"`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("expected body to contain %q", want)
@@ -784,17 +789,38 @@ func TestDashboardEventActions(t *testing.T) {
 
 		ds := newDashboardTestStack()
 		ds.store.getByIDFn = func(_ context.Context, _ string) (*model.ChangeEvent, error) {
-			return &model.ChangeEvent{ID: "event-1"}, nil
+			return &model.ChangeEvent{ID: "event-1", EventType: "deployment", Description: "Deploy service"}, nil
+		}
+		ds.store.getAnnotationsFn = func(_ context.Context, _ string) (*model.EventAnnotations, error) {
+			return &model.EventAnnotations{}, nil
 		}
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events/event-1/links", nil)
 		addCSRFFormToRequest(t, req, url.Values{
-			"link_label": {"deceptive"},
-			"link_url":   {"https://trusted.example@evil.example/path"},
+			"link_label": {"Release plan", "deceptive <link>"},
+			"link_url":   {"https://example.com/release-plan", "https://trusted.example@evil.example/path"},
 		})
 		rec := httptest.NewRecorder()
 		ds.router.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+			t.Errorf("Content-Type = %q, want text/html", contentType)
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			"Link must be an absolute HTTP or HTTPS URL without credentials",
+			`value="Release plan"`,
+			`value="https://example.com/release-plan"`,
+			`value="deceptive &lt;link&gt;"`,
+			`value="https://trusted.example@evil.example/path"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("validation response does not contain %q", want)
+			}
+		}
+		if strings.Contains(body, "deceptive <link>") {
+			t.Error("validation response did not escape the submitted label")
 		}
 	})
 
@@ -830,6 +856,201 @@ func TestDashboardEventActions(t *testing.T) {
 		ds.router.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestDashboardRecordChange(t *testing.T) {
+	t.Parallel()
+
+	t.Run("GET renders the record change form", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/events/new", nil)
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /events/new status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			`data-interface="phosphor-deck"`,
+			`href="/events/new"`,
+			`action="/events"`,
+			`name="csrf_token"`,
+			`name="event_type"`,
+			`name="description"`,
+			`name="long_description"`,
+			`name="external_id"`,
+			`name="tags"`,
+			`name="link_label"`,
+			`name="link_url"`,
+			`data-record-form`,
+			`data-link-row`,
+			`src="/static/form-validation.js"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("GET /events/new body does not contain %q", want)
+			}
+		}
+		if strings.Contains(body, `name="timestamp"`) {
+			t.Error("GET /events/new exposes a caller-controlled timestamp")
+		}
+	})
+
+	t.Run("invalid initial link re-renders entered values", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events", nil)
+		addCSRFFormToRequest(t, req, url.Values{
+			"event_type":  {"deployment"},
+			"description": {"Deploy checkout"},
+			"link_label":  {"Runbook <draft>"},
+			"link_url":    {"javascript:alert(1)"},
+		})
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("POST /events invalid link status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			"Link must be an absolute HTTP or HTTPS URL without credentials",
+			`value="Runbook &lt;draft&gt;"`,
+			`value="javascript:alert(1)"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("validation response does not contain %q", want)
+			}
+		}
+	})
+
+	t.Run("duplicate external ID redirects to the existing event", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		existing := &model.ChangeEvent{ID: "existing-event"}
+		ds.store.createFn = func(_ context.Context, _ *model.ChangeEvent) (*model.ChangeEvent, error) {
+			return existing, store.ErrDuplicate
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events", nil)
+		addCSRFFormToRequest(t, req, url.Values{
+			"event_type":  {"deployment"},
+			"description": {"Duplicate delivery"},
+			"external_id": {"deploy-123"},
+		})
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("POST /events duplicate status = %d, want %d; body = %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+		}
+		if location := rec.Header().Get("Location"); location != "/events/existing-event" {
+			t.Errorf("POST /events duplicate Location = %q, want %q", location, "/events/existing-event")
+		}
+	})
+
+	t.Run("POST creates an attributed event and redirects to detail", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		var created *model.ChangeEvent
+		ds.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			created = event
+			return event, nil
+		}
+		before := time.Now().UTC()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events", nil)
+		addCSRFFormToRequest(t, req, url.Values{
+			"user_name":        {"mallory"},
+			"event_type":       {" deployment "},
+			"description":      {" Deploy payments v2.5.0 "},
+			"long_description": {"Rolling update across three regions."},
+			"external_id":      {" github-actions-2468 "},
+			"timestamp":        {"2001-01-01T00:00"},
+			"tags":             {"team=payments\nscope=service\nseverity=sev2"},
+			"link_label":       {"Release PR"},
+			"link_url":         {"https://github.com/example/payments/pull/2468"},
+		})
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+		after := time.Now().UTC()
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("POST /events status = %d, want %d; body = %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+		}
+		if created == nil {
+			t.Fatal("POST /events did not create an event")
+		}
+		if location := rec.Header().Get("Location"); location != "/events/"+created.ID {
+			t.Errorf("POST /events Location = %q, want %q", location, "/events/"+created.ID)
+		}
+		if created.UserName != "alice" || created.UserProvider != "github" || created.UserSubject != "12345" {
+			t.Errorf("created identity = %q/%q/%q, want alice/github/12345", created.UserName, created.UserProvider, created.UserSubject)
+		}
+		if created.EventType != "deployment" || created.Description != "Deploy payments v2.5.0" || created.ExternalID != "github-actions-2468" {
+			t.Errorf("created core fields = type %q, description %q, external ID %q", created.EventType, created.Description, created.ExternalID)
+		}
+		if created.Timestamp.Before(before) || created.Timestamp.After(after) {
+			t.Errorf("created timestamp = %s, want server time between %s and %s", created.Timestamp, before, after)
+		}
+		wantTags := map[string]string{"team": "payments", "scope": "service", "severity": "sev2"}
+		if !maps.Equal(created.Tags, wantTags) {
+			t.Errorf("created tags = %v, want %v", created.Tags, wantTags)
+		}
+		if len(created.Links) != 1 || created.Links[0].Label != "Release PR" || created.Links[0].URL != "https://github.com/example/payments/pull/2468" {
+			t.Errorf("created links = %+v", created.Links)
+		}
+	})
+
+	t.Run("invalid input re-renders entered values", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		var createCalled bool
+		ds.store.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+			createCalled = true
+			return event, nil
+		}
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events", nil)
+		addCSRFFormToRequest(t, req, url.Values{
+			"event_type":  {"deployment"},
+			"description": {"Deploy <payments>"},
+			"tags":        {"team=payments\nmissing-separator"},
+		})
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("POST /events invalid status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+		if createCalled {
+			t.Error("POST /events created an event with invalid tags")
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "Tags must use one key=value pair per line") {
+			t.Errorf("invalid response does not explain tag format: %s", body)
+		}
+		if !strings.Contains(body, "Deploy &lt;payments&gt;") || strings.Contains(body, "Deploy <payments>") {
+			t.Error("invalid response did not preserve and escape the submitted description")
+		}
+	})
+
+	t.Run("missing CSRF token is forbidden", func(t *testing.T) {
+		t.Parallel()
+
+		ds := newDashboardTestStack()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/events", strings.NewReader("event_type=deployment&description=deploy"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		ds.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("POST /events without CSRF status = %d, want %d", rec.Code, http.StatusForbidden)
 		}
 	})
 }

@@ -279,6 +279,18 @@ func TestAuthEnforcement(t *testing.T) {
 				path:   "/events/some-id",
 				status: http.StatusFound,
 			},
+			{
+				name:   "GET /events/new without auth",
+				method: http.MethodGet,
+				path:   "/events/new",
+				status: http.StatusFound,
+			},
+			{
+				name:   "POST /events without auth",
+				method: http.MethodPost,
+				path:   "/events",
+				status: http.StatusUnauthorized,
+			},
 		}
 
 		for _, tc := range tests {

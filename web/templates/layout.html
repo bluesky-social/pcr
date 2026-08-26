@@ -12,6 +12,7 @@
         <a href="/" class="navbar-title"><span class="brand-code">PCR</span><span>Production Change Registry</span></a>
         {{if .UserName}}
         <div class="navbar-session">
+            <a href="/events/new" class="navbar-action">Record change</a>
             <span class="navbar-user">Signed in as {{.UserName}}</span>
             <form method="POST" action="/logout" class="navbar-logout">
                 <input type="hidden" name="csrf_token" value="{{.LogoutCSRF}}">

@@ -79,18 +79,30 @@
         </form>
         {{end}}
 
-        <form method="POST" action="/events/{{.Event.ID}}/links" class="add-links-form">
+        <form method="POST" action="/events/{{.Event.ID}}/links" class="add-links-form" data-add-links-form>
             <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
             <fieldset>
                 <legend>Add links</legend>
+                {{if .ActionError}}<div class="error-message" role="alert"><strong>Unable to add links</strong><span>{{.ActionError}}</span></div>{{end}}
+                <div class="error-message form-validation-message" role="alert" data-form-error hidden></div>
                 <div id="link-rows" class="link-rows">
-                    <div class="link-row">
-                        <div class="filter-group"><label for="link-label-1">Label</label><input id="link-label-1" name="link_label" type="text" maxlength="256" placeholder="e.g. PagerDuty incident"></div>
-                        <div class="filter-group"><label for="link-url-1">URL</label><input id="link-url-1" name="link_url" type="url" maxlength="2048" required placeholder="https://..."></div>
+                    {{if .PendingLinks}}
+                    {{range $index, $link := .PendingLinks}}
+                    <div class="link-row" data-link-row>
+                        <div class="filter-group"><label for="link-label-{{$index}}">Label</label><input id="link-label-{{$index}}" name="link_label" type="text" maxlength="256" value="{{$link.Label}}" placeholder="e.g. PagerDuty incident"></div>
+                        <div class="filter-group"><label for="link-url-{{$index}}">URL</label><input id="link-url-{{$index}}" name="link_url" type="url" maxlength="2048" value="{{$link.URL}}" required placeholder="https://..."></div>
+                        {{if $index}}<button type="button" class="remove-link-row button-secondary">Remove</button>{{end}}
                     </div>
+                    {{end}}
+                    {{else}}
+                    <div class="link-row" data-link-row>
+                        <div class="filter-group"><label for="link-label-0">Label</label><input id="link-label-0" name="link_label" type="text" maxlength="256" placeholder="e.g. PagerDuty incident"></div>
+                        <div class="filter-group"><label for="link-url-0">URL</label><input id="link-url-0" name="link_url" type="url" maxlength="2048" required placeholder="https://..."></div>
+                    </div>
+                    {{end}}
                 </div>
                 <template id="link-row-template">
-                    <div class="link-row">
+                    <div class="link-row" data-link-row>
                         <div class="filter-group"><label>Label</label><input name="link_label" type="text" maxlength="256" placeholder="e.g. Pull request"></div>
                         <div class="filter-group"><label>URL</label><input name="link_url" type="url" maxlength="2048" required placeholder="https://..."></div>
                         <button type="button" class="remove-link-row button-secondary">Remove</button>
@@ -119,24 +131,5 @@
         {{else}}<p class="muted-copy">No annotations yet.</p>{{end}}
     </section>
 </div>
-<script>
-document.getElementById('add-link-row').addEventListener('click', function () {
-    var rows = document.getElementById('link-rows');
-    var fragment = document.getElementById('link-row-template').content.cloneNode(true);
-    var row = fragment.querySelector('.link-row');
-    var position = rows.children.length + 1;
-    var inputs = row.querySelectorAll('input');
-    var labels = row.querySelectorAll('label');
-    inputs[0].id = 'link-label-' + position;
-    inputs[1].id = 'link-url-' + position;
-    labels[0].htmlFor = inputs[0].id;
-    labels[1].htmlFor = inputs[1].id;
-    rows.appendChild(fragment);
-});
-document.getElementById('link-rows').addEventListener('click', function (event) {
-    if (event.target.classList.contains('remove-link-row')) {
-        event.target.closest('.link-row').remove();
-    }
-});
-</script>
+<script src="/static/form-validation.js" defer></script>
 {{end}}

@@ -61,6 +61,8 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 		}
 
 		r.Get("/", dashHandler.Dashboard)
+		r.Get("/events/new", dashHandler.ShowCreateEvent)
+		r.Post("/events", dashHandler.CreateEvent)
 		r.Get("/events/{id}", dashHandler.Detail)
 		r.Post("/events/{id}/star", dashHandler.ToggleStar)
 		r.Post("/events/{id}/alert", dashHandler.ToggleAlert)

@@ -222,9 +222,81 @@ func TestSeededDashboardViews(t *testing.T) {
 	if cssResponse.Code != http.StatusOK || !strings.Contains(cssResponse.Body.String(), "/static/fonts/ChakraPetch-Regular.ttf") {
 		t.Errorf("stylesheet does not reference the local body font; status = %d", cssResponse.Code)
 	}
+
+	jsRequest := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/form-validation.js", nil)
+	jsResponse := httptest.NewRecorder()
+	r.ServeHTTP(jsResponse, jsRequest)
+	if jsResponse.Code != http.StatusOK || !strings.Contains(jsResponse.Body.String(), "function validateLinks") {
+		t.Errorf("form validation script response = status %d; expected embedded validator", jsResponse.Code)
+	}
 }
 
-func seededDashboardRouter(t *testing.T) http.Handler {
+func TestRecordChangeFormTreatsSQLAsData(t *testing.T) {
+	t.Parallel()
+
+	dashboard := seededDashboardRouter(t)
+	payload := `value'); DROP TABLE change_events; --`
+	response := performDashboardForm(t, dashboard, "/events", url.Values{
+		"user_name":        {payload},
+		"event_type":       {payload},
+		"description":      {payload},
+		"long_description": {payload},
+		"external_id":      {payload},
+		"tags":             {payload + "=" + payload},
+		"link_label":       {payload},
+		"link_url":         {"https://example.com/?q=%27%3Bdrop"},
+	})
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("record SQL-looking change status = %d, want %d; body = %s", response.Code, http.StatusSeeOther, response.Body.String())
+	}
+	location := response.Header().Get("Location")
+	eventID, ok := strings.CutPrefix(location, "/events/")
+	if !ok || eventID == "" {
+		t.Fatalf("record SQL-looking change Location = %q, want event detail path", location)
+	}
+
+	readback := performAPIRequest(t, dashboard, http.MethodGet, "/api/v1/events/"+eventID, "")
+	if readback.Code != http.StatusOK {
+		t.Fatalf("read SQL-looking change status = %d, want %d; body = %s", readback.Code, http.StatusOK, readback.Body.String())
+	}
+	var event model.ChangeEvent
+	if err := json.NewDecoder(readback.Body).Decode(&event); err != nil {
+		t.Fatalf("decode SQL-looking change: %v", err)
+	}
+	if event.EventType != payload || event.Description != payload || event.LongDescription != payload || event.ExternalID != payload {
+		t.Errorf("SQL-looking event fields = %#v, want payload preserved", event)
+	}
+	if event.UserName != "alice" {
+		t.Errorf("SQL-looking event UserName = %q, want authenticated user alice", event.UserName)
+	}
+	if event.Tags[payload] != payload {
+		t.Errorf("SQL-looking event Tags[%q] = %q, want payload", payload, event.Tags[payload])
+	}
+	if len(event.Links) != 1 || event.Links[0].Label != payload {
+		t.Errorf("SQL-looking event Links = %#v, want payload label", event.Links)
+	}
+
+	probe := performDashboardForm(t, dashboard, "/events", url.Values{
+		"event_type":  {"deployment"},
+		"description": {"Database remains operational"},
+	})
+	if probe.Code != http.StatusSeeOther {
+		t.Fatalf("record probe change status = %d, want %d; body = %s", probe.Code, http.StatusSeeOther, probe.Body.String())
+	}
+}
+
+type seededDashboard struct {
+	handler       http.Handler
+	cookie        *http.Cookie
+	sessionSecret []byte
+}
+
+func (d *seededDashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.AddCookie(d.cookie)
+	d.handler.ServeHTTP(w, r)
+}
+
+func seededDashboardRouter(t *testing.T) *seededDashboard {
 	t.Helper()
 
 	databaseURL := functionalDatabaseURL(t)
@@ -260,29 +332,27 @@ func seededDashboardRouter(t *testing.T) http.Handler {
 		t.Fatalf("apply fixture: %v", err)
 	}
 
+	sessionSecret := []byte("functional-test-session-secret-32b")
 	apiHandler := handler.NewAPIHandler(svc, pool)
-	dashboardHandler := handler.NewDashboardHandler(svc, 0, []byte("functional-test-session-secret-32b"))
+	dashboardHandler := handler.NewDashboardHandler(svc, 0, sessionSecret)
 	authenticator := humanauth.NewGitHub(humanauth.ProviderOptions{ClientID: "test", AllowAny: true})
 	humanAuthHandler := handler.NewHumanAuthHandler(authenticator, handler.HumanAuthOptions{
-		SessionSecret: []byte("functional-test-session-secret-32b"), SessionDuration: time.Hour,
+		SessionSecret: sessionSecret, SessionDuration: time.Hour,
 	})
 	mux := router.New(apiHandler, dashboardHandler, humanAuthHandler, &config.Config{
 		APITokens:         []string{"demo-token"},
 		RequireAuthReads:  false,
-		SessionSecret:     []byte("functional-test-session-secret-32b"),
+		SessionSecret:     sessionSecret,
 		HumanAuthProvider: "github",
 	})
 	cookieRecorder := httptest.NewRecorder()
 	if err := middleware.SetHumanSessionCookie(cookieRecorder, middleware.HumanSessionOptions{
-		Secret: []byte("functional-test-session-secret-32b"), Duration: time.Hour,
+		Secret: sessionSecret, Duration: time.Hour,
 	}, humanauth.Principal{Provider: "github", Subject: "12345", UserName: "alice"}); err != nil {
 		t.Fatalf("SetHumanSessionCookie(): %v", err)
 	}
 	cookie := cookieRecorder.Result().Cookies()[0]
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.AddCookie(cookie)
-		mux.ServeHTTP(w, r)
-	})
+	return &seededDashboard{handler: mux, cookie: cookie, sessionSecret: sessionSecret}
 }
 
 func functionalDatabaseURL(t *testing.T) string {
@@ -340,6 +410,23 @@ func performAPIRequest(t *testing.T, handler http.Handler, method, path, body st
 	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
+	return response
+}
+
+func performDashboardForm(t *testing.T, dashboard *seededDashboard, path string, values url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+
+	sessionRequest := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	sessionRequest.AddCookie(dashboard.cookie)
+	session, err := middleware.ReadHumanSession(sessionRequest, dashboard.sessionSecret, "github")
+	if err != nil {
+		t.Fatalf("ReadHumanSession(): %v", err)
+	}
+	values.Set("csrf_token", middleware.GenerateCSRFToken(dashboard.sessionSecret, session.Nonce))
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, path, strings.NewReader(values.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	dashboard.ServeHTTP(response, request)
 	return response
 }
 

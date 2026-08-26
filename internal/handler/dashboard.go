@@ -28,6 +28,7 @@ type DashboardHandler struct {
 	refreshSec    int
 	dashboardTmpl *template.Template
 	detailTmpl    *template.Template
+	recordTmpl    *template.Template
 }
 
 // NewDashboardHandler parses the embedded templates and returns a ready handler.
@@ -78,6 +79,13 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 			"templates/detail.html",
 		),
 	)
+	recordTmpl := template.Must(
+		template.New("").Funcs(funcMap).ParseFS(
+			web.TemplateFS,
+			"templates/layout.html",
+			"templates/record.html",
+		),
+	)
 
 	return &DashboardHandler{
 		svc:           svc,
@@ -85,6 +93,7 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 		refreshSec:    refreshSec,
 		dashboardTmpl: dashboardTmpl,
 		detailTmpl:    detailTmpl,
+		recordTmpl:    recordTmpl,
 	}
 }
 
@@ -143,6 +152,8 @@ type detailData struct {
 	Links          []model.EventLink
 	Activity       []model.ChangeEvent
 	OperationState string
+	ActionError    string
+	PendingLinks   []model.EventLink
 }
 
 // quickRanges maps the quick-select range values to durations.
@@ -315,6 +326,10 @@ func buildDashboardEvents(events []model.ChangeEvent, annotations map[string]*mo
 
 // Detail handles GET /events/{id} and renders the event detail page.
 func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
+	h.renderDetail(w, r, http.StatusOK, "", nil)
+}
+
+func (h *DashboardHandler) renderDetail(w http.ResponseWriter, r *http.Request, status int, actionError string, pendingLinks []model.EventLink) {
 	id := chi.URLParam(r, "id")
 
 	event, err := h.svc.GetByID(r.Context(), id)
@@ -361,9 +376,14 @@ func (h *DashboardHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		Links:          links,
 		Activity:       activity,
 		OperationState: operationState,
+		ActionError:    actionError,
+		PendingLinks:   pendingLinks,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	if err := h.detailTmpl.ExecuteTemplate(w, "layout", data); err != nil {
 		slog.ErrorContext(r.Context(), "detail template execute error", "error", err, "event_id", id)
 		http.Error(w, "Template error", http.StatusInternalServerError)
@@ -430,6 +450,14 @@ func (h *DashboardHandler) AddLinks(w http.ResponseWriter, r *http.Request) {
 	links := parseLinkForm(r.PostForm)
 	event, err := h.svc.AddLinksAs(r.Context(), chi.URLParam(r, "id"), user, links)
 	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrLinksRequired):
+			h.renderDetail(w, r, http.StatusBadRequest, "Add at least one link.", links)
+			return
+		case errors.Is(err, service.ErrInvalidLink):
+			h.renderDetail(w, r, http.StatusBadRequest, invalidLinkMessage, links)
+			return
+		}
 		h.writeActionError(w, r, err, "add links")
 		return
 	}

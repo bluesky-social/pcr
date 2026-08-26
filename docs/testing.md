@@ -32,6 +32,14 @@ PCR_TEST_POSTGRES_URL="$PCR_TEST_POSTGRES_URL" go test -tags=integration ./inter
 
 It loads `testdata/functional/phosphor-demo.json` and exercises Current, Site-wide, History, Alerts, lifecycle reduction, link annotations, alert toggling, operation closure, safely escaped link labels, the activity trail, the severity banner, and locally embedded font delivery through the real router.
 
+Run the form-to-PostgreSQL injection regression independently:
+
+```bash
+PCR_TEST_POSTGRES_URL="$PCR_TEST_POSTGRES_URL" go test -race -tags=integration ./internal/handler -run TestRecordChangeFormTreatsSQLAsData
+```
+
+This submits SQL-looking values as an authenticated, CSRF-protected browser form through the real router and PostgreSQL store, reads the unchanged values back through the API, and performs a second form write to prove the database remains operational. Client-side validation is intentionally bypassed so the test exercises the authoritative server boundary.
+
 Fuzz the repeated link form fields and link security validator:
 
 ```bash

@@ -77,6 +77,8 @@ The API is append-only. There are no PUT, PATCH, or DELETE endpoints. Events are
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/` | Dashboard (requires a human session) |
+| `GET` | `/events/new` | Show the record-change form |
+| `POST` | `/events` | Record a change attributed to the signed-in human |
 | `GET` | `/events/{id}` | Event detail page |
 | `POST` | `/events/{id}/star` | Toggle star (redirects back, requires CSRF token) |
 | `POST` | `/events/{id}/alert` | Toggle alert state (redirects back, requires CSRF token) |
@@ -417,6 +419,7 @@ The built-in HTML dashboard is served at `/`. Authenticate through the single Gi
 - Time range buttons to filter events by predefined windows (last 5 minutes, 30 minutes, 1 hour, and 24 hours)
 - Clickable tags that filter the event list to matching events
 - A star toggle on each event (creates star/unstar meta-events behind the scenes)
+- An authenticated form for recording new production changes
 - Alert/clear-alert controls plus filtering and highlighting for active alerts
 - A repeatable form for appending validated external links
 - A close action for active correlated operations

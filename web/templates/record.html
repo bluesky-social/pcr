@@ -1,0 +1,82 @@
+{{define "content"}}
+<div class="record-page instrument-housing">
+    <a href="/" class="back-link">&larr; Back to dashboard</a>
+
+    <header class="record-header">
+        <div>
+            <span class="signal-code">ENTRY / NEW</span>
+            <h2>Record change</h2>
+            <p>Append an immutable production change attributed to your signed-in identity.</p>
+        </div>
+    </header>
+
+    {{if .Error}}<div class="error-message" role="alert"><strong>Unable to record change</strong><span>{{.Error}}</span></div>{{end}}
+
+    <form method="POST" action="/events" class="record-form" data-record-form>
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <div class="error-message form-validation-message" role="alert" data-form-error hidden></div>
+
+        <section class="record-section" aria-labelledby="change-signal-heading">
+            <div class="status-rail"><h3 id="change-signal-heading">Change signal</h3><span>Required</span></div>
+            <div class="record-grid">
+                <div class="record-field">
+                    <label for="event-type">Event type</label>
+                    <input id="event-type" name="event_type" type="text" list="event-types" value="{{.Form.EventType}}" placeholder="e.g. deployment" required autofocus>
+                    <datalist id="event-types">
+                        <option value="deployment"></option>
+                        <option value="feature-flag"></option>
+                        <option value="k8s-change"></option>
+                        <option value="maintenance"></option>
+                        <option value="incident"></option>
+                    </datalist>
+                </div>
+                <div class="record-field record-field-wide">
+                    <label for="description">Summary</label>
+                    <input id="description" name="description" type="text" value="{{.Form.Description}}" placeholder="What is changing?" required>
+                </div>
+            </div>
+        </section>
+
+        <section class="record-section" aria-labelledby="change-context-heading">
+            <div class="status-rail"><h3 id="change-context-heading">Change context</h3><span>Optional</span></div>
+            <div class="record-grid">
+                <div class="record-field record-field-full">
+                    <label for="external-id">External ID</label>
+                    <input id="external-id" name="external_id" type="text" value="{{.Form.ExternalID}}" placeholder="e.g. github-actions-2468">
+                    <small>Repeated IDs are safely deduplicated.</small>
+                </div>
+                <div class="record-field record-field-full">
+                    <label for="long-description">Long description</label>
+                    <textarea id="long-description" name="long_description" rows="5" placeholder="Plan, scope, rollout notes, or verification steps">{{.Form.LongDescription}}</textarea>
+                </div>
+                <div class="record-field record-field-full">
+                    <label for="tags">Tags</label>
+                    <textarea id="tags" name="tags" rows="5" placeholder="team=payments&#10;scope=service&#10;severity=sev2">{{.Form.Tags}}</textarea>
+                    <small>Enter one key=value pair per line. Use change_id and phase=start for a closable operation.</small>
+                </div>
+            </div>
+        </section>
+
+        <section class="record-section" aria-labelledby="initial-link-heading">
+            <div class="status-rail"><h3 id="initial-link-heading">Initial link</h3><span>Optional</span></div>
+            <div class="record-grid" data-link-row>
+                <div class="record-field">
+                    <label for="link-label">Label</label>
+                    <input id="link-label" name="link_label" type="text" maxlength="256" value="{{.Form.LinkLabel}}" placeholder="e.g. rollout plan">
+                </div>
+                <div class="record-field record-field-wide">
+                    <label for="link-url">URL</label>
+                    <input id="link-url" name="link_url" type="url" maxlength="2048" value="{{.Form.LinkURL}}" placeholder="https://...">
+                    <small>Additional links can be appended from the event detail page.</small>
+                </div>
+            </div>
+        </section>
+
+        <div class="record-actions">
+            <a href="/" class="button-secondary">Cancel</a>
+            <button type="submit">Record change</button>
+        </div>
+    </form>
+</div>
+<script src="/static/form-validation.js" defer></script>
+{{end}}
