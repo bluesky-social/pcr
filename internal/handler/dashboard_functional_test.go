@@ -39,7 +39,7 @@ func TestSeededDashboardViews(t *testing.T) {
 	for _, want := range []string{
 		`data-interface="phosphor-deck"`,
 		`class="dashboard-summary instrument-housing"`,
-		"Active high-severity changes",
+		"Active high-visibility changes",
 		"Ledger reconciliation backfill",
 		"Primary card vault key rotation",
 		"West coast edge traffic evacuation",
@@ -47,6 +47,32 @@ func TestSeededDashboardViews(t *testing.T) {
 	} {
 		if !strings.Contains(current, want) {
 			t.Errorf("Current response does not contain %q", want)
+		}
+	}
+
+	filteredSite := renderDashboard(t, r, "/?view=current&team=payments&type=incident&scope=site&severity=sev0")
+	filteredSiteTable := dashboardTableBody(t, filteredSite)
+	filteredSiteBanner := dashboardBannerBody(t, filteredSite)
+	if !strings.Contains(filteredSiteTable, "West coast edge traffic evacuation") || !strings.Contains(filteredSiteBanner, "West coast edge traffic evacuation") {
+		t.Error("site/SEV0 filters do not retain the site incident in both the Current table and high-visibility banner")
+	}
+	for _, excluded := range []string{"Primary card vault key rotation", "Orders archive compaction", "Ingress controller fleet replacement"} {
+		if strings.Contains(filteredSiteTable, excluded) || strings.Contains(filteredSiteBanner, excluded) {
+			t.Errorf("site/SEV0 filters unexpectedly retain %q", excluded)
+		}
+	}
+
+	filteredMaintenance := renderDashboard(t, r, "/?view=current&team=payments&type=maintenance&severity=sev1")
+	filteredMaintenanceTable := dashboardTableBody(t, filteredMaintenance)
+	filteredMaintenanceBanner := dashboardBannerBody(t, filteredMaintenance)
+	for _, want := range []string{"Primary card vault key rotation", "Orders archive compaction"} {
+		if !strings.Contains(filteredMaintenanceTable, want) || !strings.Contains(filteredMaintenanceBanner, want) {
+			t.Errorf("maintenance/SEV1 filters do not retain %q in both the Current table and high-visibility banner", want)
+		}
+	}
+	for _, excluded := range []string{"West coast edge traffic evacuation", "Ingress controller fleet replacement", "Ledger reconciliation backfill"} {
+		if strings.Contains(filteredMaintenanceTable, excluded) || strings.Contains(filteredMaintenanceBanner, excluded) {
+			t.Errorf("maintenance/SEV1 filters unexpectedly retain %q", excluded)
 		}
 	}
 	for _, unwanted := range []string{
@@ -439,6 +465,20 @@ func dashboardTableBody(t *testing.T, page string) string {
 	body, _, ok := strings.Cut(after, "</tbody>")
 	if !ok {
 		t.Fatal("dashboard response has no closing table body")
+	}
+	return body
+}
+
+func dashboardBannerBody(t *testing.T, page string) string {
+	t.Helper()
+
+	_, after, ok := strings.Cut(page, `<section class="severity-banner`)
+	if !ok {
+		t.Fatal("dashboard response has no high-visibility banner")
+	}
+	body, _, ok := strings.Cut(after, "</section>")
+	if !ok {
+		t.Fatal("dashboard response has no closing high-visibility banner section")
 	}
 	return body
 }

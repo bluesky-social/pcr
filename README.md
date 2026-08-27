@@ -415,7 +415,8 @@ The built-in HTML dashboard is served at `/`. Authenticate through the single Gi
 
 - A Current view for active team, unattributed, and site-wide work with no time bound
 - A Site-wide view for active `scope=site` work
-- An independent banner for visible active `sev0` and `sev1` work
+- A high-visibility banner that defaults to active `sev0` and `sev1` work and follows the selected scope, severity, and event-type filters
+- Visible active-work filters and quick selections for high-severity, site-wide, and maintenance work
 - Time range buttons to filter events by predefined windows (last 5 minutes, 30 minutes, 1 hour, and 24 hours)
 - Clickable tags that filter the event list to matching events
 - A star toggle on each event (creates star/unstar meta-events behind the scenes)

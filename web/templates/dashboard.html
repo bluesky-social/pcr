@@ -3,34 +3,10 @@
     <div class="hero-metrics" aria-label="Dashboard summary">
         <div><span>Active view</span><strong>{{.Filters.View}}</strong></div>
         <div><span>Records</span><strong>{{.TotalCount}}</strong></div>
-        <div><span>High severity</span><strong>{{.BannerTotal}}</strong></div>
+        <div><span>High visibility</span><strong>{{.BannerTotal}}</strong></div>
         <div><span>Team</span><strong>{{if .Filters.Team}}{{.Filters.Team}}{{else}}all teams{{end}}</strong></div>
     </div>
 </header>
-
-{{if .BannerEvents}}
-<section class="severity-banner instrument-housing alarm-housing" aria-label="Active high-severity changes">
-    <div class="severity-banner-header">
-        <strong>Active high-severity changes</strong><span>Operator attention required</span>
-    </div>
-    <ul class="severity-banner-list">
-        {{range .BannerEvents}}
-        <li>
-            <span class="badge severity-{{tagValue .Tags "severity"}}">{{tagValue .Tags "severity"}}</span>
-            {{if eq (tagValue .Tags "scope") "site"}}<span class="badge badge-site">Site-wide</span>{{end}}
-            <a href="/events/{{.ID}}">{{.Description}}</a>
-            <span class="banner-meta">
-                {{if tagValue .Tags "team"}}{{tagValue .Tags "team"}}{{else}}Unattributed{{end}}
-                · started {{formatTime .Timestamp}} · {{formatElapsed .Timestamp}}
-            </span>
-        </li>
-        {{end}}
-    </ul>
-    {{if gt .BannerTotal (len .BannerEvents)}}
-    <a href="{{.BannerURL}}" class="banner-more">View all {{.BannerTotal}} high-severity changes</a>
-    {{end}}
-</section>
-{{end}}
 
 <nav class="view-tabs signal-tabs" aria-label="Dashboard views">
     <a href="{{dashboardViewURL "current" .Filters.Team}}"{{if eq .Filters.View "current"}} class="active" aria-current="page"{{end}}>Current</a>
@@ -40,11 +16,16 @@
 </nav>
 
 <section class="filters instrument-housing filter-housing">
+    <div class="time-range-bar" aria-label="Active change presets">
+        <span class="time-range-label">Quick select:</span>
+        <a href="{{currentPresetURL "all" .Filters.Team}}" class="time-range-btn">All active</a>
+        <a href="{{currentPresetURL "high-severity" .Filters.Team}}" class="time-range-btn">SEV0–SEV1</a>
+        <a href="{{currentPresetURL "site" .Filters.Team}}" class="time-range-btn">Site-wide</a>
+        <a href="{{currentPresetURL "maintenance" .Filters.Team}}" class="time-range-btn">Maintenance windows</a>
+    </div>
     {{if or (eq .Filters.View "current") (eq .Filters.View "site")}}
     <form method="GET" action="/" class="filter-form filter-form-inline">
         <input type="hidden" name="view" value="{{.Filters.View}}">
-        {{range .Filters.Scopes}}<input type="hidden" name="scope" value="{{.}}">{{end}}
-        {{range .Filters.Severities}}<input type="hidden" name="severity" value="{{.}}">{{end}}
         {{if eq .Filters.View "current"}}
         <div class="filter-group">
             <label for="team">Team</label>
@@ -55,9 +36,31 @@
         {{end}}
         <div class="filter-group">
             <label for="current-type">Event Type</label>
-            <input type="text" id="current-type" name="type" placeholder="e.g. deployment" value="{{.Filters.EventType}}">
+            <input type="text" id="current-type" name="type" list="event-types" placeholder="Any type" value="{{.Filters.EventType}}">
         </div>
-        <div class="filter-actions"><button type="submit">Filter</button></div>
+        <fieldset class="filter-option-group">
+            <legend>Scope</legend>
+            {{range .Filters.Scopes}}{{if ne . "site"}}<input type="hidden" name="scope" value="{{.}}">{{end}}{{end}}
+            {{if eq .Filters.View "site"}}
+            <input type="hidden" name="scope" value="site">
+            <label class="filter-check"><input type="checkbox" checked disabled> Site-wide only</label>
+            {{else}}
+            <label class="filter-check"><input type="checkbox" name="scope" value="site"{{if hasValue .Filters.Scopes "site"}} checked{{end}}> Site-wide only</label>
+            {{end}}
+        </fieldset>
+        <fieldset class="filter-option-group filter-severity-options">
+            <legend>Severity <span>(none = any)</span></legend>
+            <div class="filter-checks">
+                <label class="filter-check"><input type="checkbox" name="severity" value="sev0"{{if hasValue .Filters.Severities "sev0"}} checked{{end}}> SEV0</label>
+                <label class="filter-check"><input type="checkbox" name="severity" value="sev1"{{if hasValue .Filters.Severities "sev1"}} checked{{end}}> SEV1</label>
+                <label class="filter-check"><input type="checkbox" name="severity" value="sev2"{{if hasValue .Filters.Severities "sev2"}} checked{{end}}> SEV2</label>
+                <label class="filter-check"><input type="checkbox" name="severity" value="sev3"{{if hasValue .Filters.Severities "sev3"}} checked{{end}}> SEV3</label>
+            </div>
+        </fieldset>
+        <div class="filter-actions">
+            <button type="submit">Filter</button>
+            <a href="{{dashboardViewURL .Filters.View .Filters.Team}}" class="btn-clear">Clear</a>
+        </div>
     </form>
     {{else}}
     <div class="time-range-bar">
@@ -84,7 +87,7 @@
         </div>
         <div class="filter-group">
             <label for="type">Event Type</label>
-            <input type="text" id="type" name="type" placeholder="e.g. deployment" value="{{.Filters.EventType}}">
+            <input type="text" id="type" name="type" list="event-types" placeholder="Any type" value="{{.Filters.EventType}}">
         </div>
         <div class="filter-group">
             <label for="user">User</label>
@@ -100,7 +103,7 @@
         {{if .Filters.Team}}<input type="hidden" name="team" value="{{.Filters.Team}}">{{end}}
         <div class="filter-group">
             <label for="type2">Event Type</label>
-            <input type="text" id="type2" name="type" placeholder="e.g. deployment" value="{{.Filters.EventType}}">
+            <input type="text" id="type2" name="type" list="event-types" placeholder="Any type" value="{{.Filters.EventType}}">
         </div>
         <div class="filter-group">
             <label for="user2">User</label>
@@ -120,6 +123,38 @@
     </script>
     {{end}}
 </section>
+
+<datalist id="event-types">
+    <option value="deployment"></option>
+    <option value="feature-flag"></option>
+    <option value="k8s-change"></option>
+    <option value="maintenance"></option>
+    <option value="incident"></option>
+</datalist>
+
+{{if .BannerEvents}}
+<section class="severity-banner instrument-housing alarm-housing" aria-label="Active high-visibility changes">
+    <div class="severity-banner-header">
+        <strong>Active high-visibility changes</strong><span>Matches the active filters; defaults to SEV0–SEV1</span>
+    </div>
+    <ul class="severity-banner-list">
+        {{range .BannerEvents}}
+        <li>
+            <span class="badge severity-{{tagValue .Tags "severity"}}">{{tagValue .Tags "severity"}}</span>
+            {{if eq (tagValue .Tags "scope") "site"}}<span class="badge badge-site">Site-wide</span>{{end}}
+            <a href="/events/{{.ID}}">{{.Description}}</a>
+            <span class="banner-meta">
+                {{if tagValue .Tags "team"}}{{tagValue .Tags "team"}}{{else}}Unattributed{{end}}
+                · started {{formatTime .Timestamp}} · {{formatElapsed .Timestamp}}
+            </span>
+        </li>
+        {{end}}
+    </ul>
+    {{if gt .BannerTotal (len .BannerEvents)}}
+    <a href="{{.BannerURL}}" class="banner-more">View all {{.BannerTotal}} matching changes</a>
+    {{end}}
+</section>
+{{end}}
 
 {{if .Filters.Tags}}
 <div class="active-filters instrument-housing">

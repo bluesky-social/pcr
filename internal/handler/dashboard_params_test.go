@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"testing"
 	"time"
 
@@ -432,4 +433,128 @@ func TestBuildDashboardEvents(t *testing.T) {
 			t.Errorf("expected false for nil annotation, got %+v", out[0])
 		}
 	})
+}
+
+func TestHighVisibilityParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		filters        dashboardFilters
+		wantScopes     []string
+		wantSeverities []string
+		wantType       string
+	}{
+		{
+			name:           "defaults to high severity",
+			filters:        dashboardFilters{View: "current"},
+			wantSeverities: []string{"sev0", "sev1"},
+		},
+		{
+			name: "uses selected current filters",
+			filters: dashboardFilters{
+				View:       "current",
+				Scopes:     []string{"site"},
+				Severities: []string{"sev2"},
+				EventType:  "maintenance",
+			},
+			wantScopes:     []string{"site"},
+			wantSeverities: []string{"sev2"},
+			wantType:       "maintenance",
+		},
+		{
+			name:           "site view forces site scope",
+			filters:        dashboardFilters{View: "site", Scopes: []string{"system"}},
+			wantScopes:     []string{"site"},
+			wantSeverities: []string{"sev0", "sev1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := highVisibilityParams(tc.filters)
+			if !slices.Equal(got.Scopes, tc.wantScopes) {
+				t.Errorf("highVisibilityParams().Scopes = %v, want %v", got.Scopes, tc.wantScopes)
+			}
+			if !slices.Equal(got.Severities, tc.wantSeverities) {
+				t.Errorf("highVisibilityParams().Severities = %v, want %v", got.Severities, tc.wantSeverities)
+			}
+			if got.EventType != tc.wantType {
+				t.Errorf("highVisibilityParams().EventType = %q, want %q", got.EventType, tc.wantType)
+			}
+			if got.Limit != dashboardBannerLimit {
+				t.Errorf("highVisibilityParams().Limit = %d, want %d", got.Limit, dashboardBannerLimit)
+			}
+		})
+	}
+}
+
+func TestCurrentURL(t *testing.T) {
+	t.Parallel()
+
+	rawURL := currentURL(model.CurrentParams{
+		ForTeam:    "payments",
+		Scopes:     []string{"site"},
+		Severities: []string{"sev0", "sev1"},
+		EventType:  "maintenance",
+		Limit:      20,
+	})
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", rawURL, err)
+	}
+	query := parsed.Query()
+	if query.Get("view") != "current" || query.Get("team") != "payments" || query.Get("type") != "maintenance" {
+		t.Errorf("currentURL() query = %v, want current view with payments team and maintenance type", query)
+	}
+	if !slices.Equal(query["scope"], []string{"site"}) {
+		t.Errorf("currentURL() scopes = %v, want [site]", query["scope"])
+	}
+	if !slices.Equal(query["severity"], []string{"sev0", "sev1"}) {
+		t.Errorf("currentURL() severities = %v, want [sev0 sev1]", query["severity"])
+	}
+	if query.Has("limit") {
+		t.Errorf("currentURL() query unexpectedly includes internal banner limit: %v", query)
+	}
+}
+
+func TestCurrentPresetURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		preset    string
+		wantScope string
+		wantType  string
+		wantSevs  []string
+	}{
+		{name: "all active", preset: "all"},
+		{name: "high severity", preset: "high-severity", wantSevs: []string{"sev0", "sev1"}},
+		{name: "site-wide", preset: "site", wantScope: "site"},
+		{name: "maintenance", preset: "maintenance", wantType: "maintenance"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			parsed, err := url.Parse(currentPresetURL(tc.preset, "payments"))
+			if err != nil {
+				t.Fatalf("url.Parse(currentPresetURL(%q)): %v", tc.preset, err)
+			}
+			query := parsed.Query()
+			if query.Get("team") != "payments" {
+				t.Errorf("currentPresetURL(%q) team = %q, want payments", tc.preset, query.Get("team"))
+			}
+			if query.Get("scope") != tc.wantScope {
+				t.Errorf("currentPresetURL(%q) scope = %q, want %q", tc.preset, query.Get("scope"), tc.wantScope)
+			}
+			if query.Get("type") != tc.wantType {
+				t.Errorf("currentPresetURL(%q) type = %q, want %q", tc.preset, query.Get("type"), tc.wantType)
+			}
+			if !slices.Equal(query["severity"], tc.wantSevs) {
+				t.Errorf("currentPresetURL(%q) severities = %v, want %v", tc.preset, query["severity"], tc.wantSevs)
+			}
+		})
+	}
 }

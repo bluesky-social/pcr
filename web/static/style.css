@@ -514,6 +514,52 @@ h3 {
     box-shadow: 0 0 13px rgba(124, 255, 114, 0.18);
 }
 
+.filter-option-group {
+    min-width: min(185px, 100%);
+    padding: 0;
+    color: var(--phosphor-text);
+    border: 0;
+}
+
+.filter-option-group legend {
+    margin-bottom: 0.35rem;
+    color: var(--console-muted);
+    font-size: 0.68rem;
+}
+
+.filter-option-group legend span {
+    color: #56746a;
+}
+
+.filter-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem 0.75rem;
+}
+
+.filter-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 32px;
+    color: #c2e8c5;
+    font-family: "Share Tech Mono", monospace;
+    font-size: 0.76rem;
+    white-space: nowrap;
+}
+
+.filter-check input {
+    width: 1rem;
+    height: 1rem;
+    accent-color: var(--phosphor-green);
+}
+
+.filter-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
 .filter-actions button,
 .login-form button,
 .detail-actions button {

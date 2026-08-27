@@ -57,10 +57,12 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 			return tags[key]
 		},
 		"formatElapsed": formatElapsed,
+		"hasValue":      slices.Contains[[]string, string],
 		"dashboardViewURL": func(view, team string) string {
 			return dashboardURL(view, team, "")
 		},
 		"dashboardRangeURL": dashboardURL,
+		"currentPresetURL":  currentPresetURL,
 	}
 
 	// Parse each page template separately with the shared layout
@@ -176,13 +178,10 @@ func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	banner, err := h.svc.ListCurrent(r.Context(), model.CurrentParams{
-		ForTeam:    filters.Team,
-		Severities: []string{"sev0", "sev1"},
-		Limit:      dashboardBannerLimit,
-	})
+	bannerParams := highVisibilityParams(filters)
+	banner, err := h.svc.ListCurrent(r.Context(), bannerParams)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "dashboard list high-severity events error", "error", err)
+		slog.ErrorContext(r.Context(), "dashboard list high-visibility events error", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -207,7 +206,7 @@ func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		Events:       buildDashboardEvents(result.Events, annotations),
 		BannerEvents: banner.Events,
 		BannerTotal:  banner.TotalCount,
-		BannerURL:    currentSeverityURL(filters.Team, []string{"sev0", "sev1"}),
+		BannerURL:    currentURL(bannerParams),
 		Filters:      filters,
 		TotalCount:   result.TotalCount,
 		Limit:        result.Limit,
@@ -263,15 +262,52 @@ func dashboardURL(view, team, rangeValue string) string {
 	return "/?" + q.Encode()
 }
 
-func currentSeverityURL(team string, severities []string) string {
+func currentURL(params model.CurrentParams) string {
 	q := url.Values{"view": {"current"}}
-	if team != "" {
-		q.Set("team", team)
+	if params.ForTeam != "" {
+		q.Set("team", params.ForTeam)
 	}
-	for _, severity := range severities {
+	for _, scope := range params.Scopes {
+		q.Add("scope", scope)
+	}
+	for _, severity := range params.Severities {
 		q.Add("severity", severity)
 	}
+	if params.EventType != "" {
+		q.Set("type", params.EventType)
+	}
 	return "/?" + q.Encode()
+}
+
+func currentPresetURL(preset, team string) string {
+	params := model.CurrentParams{ForTeam: team}
+	switch preset {
+	case "high-severity":
+		params.Severities = []string{"sev0", "sev1"}
+	case "site":
+		params.Scopes = []string{"site"}
+	case "maintenance":
+		params.EventType = "maintenance"
+	}
+	return currentURL(params)
+}
+
+func highVisibilityParams(filters dashboardFilters) model.CurrentParams {
+	scopes := slices.Clone(filters.Scopes)
+	if filters.View == "site" {
+		scopes = []string{"site"}
+	}
+	severities := slices.Clone(filters.Severities)
+	if len(severities) == 0 {
+		severities = []string{"sev0", "sev1"}
+	}
+	return model.CurrentParams{
+		ForTeam:    filters.Team,
+		Scopes:     scopes,
+		Severities: severities,
+		EventType:  filters.EventType,
+		Limit:      dashboardBannerLimit,
+	}
 }
 
 func formatElapsed(timestamp time.Time) string {

@@ -280,7 +280,7 @@ Register `http://localhost:8080/auth/callback`, open `http://localhost:8080/logi
 1. The default view contains top-level events timestamped within the last 24 hours.
 2. Current shows the selected team's active work, unattributed active work, and active site-wide work regardless of age.
 3. Site-wide shows only active `scope=site` work, and site rows are visually distinct.
-4. Active `sev0` and `sev1` work appears in the banner independently of table pagination.
+4. Active `sev0` and `sev1` work appears in the banner by default, independently of table pagination; scope, severity, and event-type selections narrow both the active table and banner.
 5. Time-range, event-type, user, and tag filters change History rows.
 6. The star button changes the event's current star annotation.
 7. An actively alerted event has alert styling and appears in the Alerts view if its parent event is within the selected time range.

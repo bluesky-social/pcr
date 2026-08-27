@@ -521,15 +521,15 @@ func TestDashboard(t *testing.T) {
 		}
 		var tableParams, bannerParams model.CurrentParams
 		ds.store.listCurrentFn = func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
-			if len(params.Severities) == 2 && params.Severities[0] == "sev0" && params.Severities[1] == "sev1" {
+			if params.Offset == 0 {
 				bannerParams = params
 				return &model.ListResult{
 					Events: []model.ChangeEvent{{
 						ID:          "site-incident",
-						EventType:   "incident",
+						EventType:   "deployment",
 						Description: "database failover in progress",
 						Timestamp:   time.Now().UTC().Add(-time.Hour),
-						Tags:        map[string]string{"team": "platform", "scope": "site", "severity": "SEV0"},
+						Tags:        map[string]string{"team": "payments", "scope": "site", "severity": "sev2"},
 					}},
 					TotalCount: 2,
 					Limit:      params.Limit,
@@ -555,7 +555,7 @@ func TestDashboard(t *testing.T) {
 		req := httptest.NewRequestWithContext(
 			t.Context(),
 			http.MethodGet,
-			"/?view=current&team=payments&type=deployment&severity=sev2&limit=1&offset=1",
+			"/?view=current&team=payments&type=deployment&scope=site&severity=sev2&limit=1&offset=1",
 			nil,
 		)
 		rec := httptest.NewRecorder()
@@ -573,20 +573,32 @@ func TestDashboard(t *testing.T) {
 		if len(tableParams.Severities) != 1 || tableParams.Severities[0] != "sev2" {
 			t.Errorf("table severities = %v, want [sev2]", tableParams.Severities)
 		}
-		if bannerParams.ForTeam != "payments" || bannerParams.Limit <= tableParams.Limit {
-			t.Errorf("banner params = %+v, want independent bounded query", bannerParams)
+		if len(tableParams.Scopes) != 1 || tableParams.Scopes[0] != "site" {
+			t.Errorf("table scopes = %v, want [site]", tableParams.Scopes)
+		}
+		if bannerParams.ForTeam != "payments" || bannerParams.EventType != "deployment" || bannerParams.Limit <= tableParams.Limit {
+			t.Errorf("banner params = %+v, want selected team/type and independent bounded query", bannerParams)
+		}
+		if len(bannerParams.Severities) != 1 || bannerParams.Severities[0] != "sev2" {
+			t.Errorf("banner severities = %v, want [sev2]", bannerParams.Severities)
+		}
+		if len(bannerParams.Scopes) != 1 || bannerParams.Scopes[0] != "site" {
+			t.Errorf("banner scopes = %v, want [site]", bannerParams.Scopes)
 		}
 
 		body := rec.Body.String()
 		for _, want := range []string{
-			"Active high-severity changes",
+			"Active high-visibility changes",
 			"database failover in progress",
 			"Site-wide",
 			"payments rollout",
+			"Maintenance windows",
+			`list="event-types"`,
+			`name="scope" value="site" checked`,
+			`name="severity" value="sev2" checked`,
 			"Current",
 			"Next",
-			"team=payments",
-			"view=current",
+			`href="/?scope=site&amp;severity=sev2&amp;team=payments&amp;type=deployment&amp;view=current" class="banner-more"`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("body does not contain %q", want)
@@ -598,9 +610,11 @@ func TestDashboard(t *testing.T) {
 		t.Parallel()
 
 		ds := newDashboardTestStack()
-		var siteParams model.CurrentParams
+		var siteParams, bannerParams model.CurrentParams
 		ds.store.listCurrentFn = func(_ context.Context, params model.CurrentParams) (*model.ListResult, error) {
-			if len(params.Severities) == 0 {
+			if len(params.Severities) == 2 {
+				bannerParams = params
+			} else {
 				siteParams = params
 			}
 			return &model.ListResult{Events: []model.ChangeEvent{}, Limit: params.Limit}, nil
@@ -618,6 +632,12 @@ func TestDashboard(t *testing.T) {
 		}
 		if siteParams.ForTeam != "" {
 			t.Errorf("site ForTeam = %q, want empty", siteParams.ForTeam)
+		}
+		if len(bannerParams.Scopes) != 1 || bannerParams.Scopes[0] != "site" {
+			t.Errorf("banner scopes = %v, want [site]", bannerParams.Scopes)
+		}
+		if len(bannerParams.Severities) != 2 || bannerParams.Severities[0] != "sev0" || bannerParams.Severities[1] != "sev1" {
+			t.Errorf("banner severities = %v, want [sev0 sev1]", bannerParams.Severities)
 		}
 	})
 
