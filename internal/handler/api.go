@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/sarah/go-prod-change-registry/internal/middleware"
 	"github.com/sarah/go-prod-change-registry/internal/model"
 	"github.com/sarah/go-prod-change-registry/internal/service"
 	"github.com/sarah/go-prod-change-registry/internal/store"
@@ -75,6 +76,11 @@ func (h *APIHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(ctx, w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
 		return
 	}
+	if identity, ok := authenticatedAPIIdentity(r); ok {
+		req.UserName = identity.Name
+		req.UserProvider = identity.Provider
+		req.UserSubject = identity.Subject
+	}
 
 	event, err := h.svc.Create(ctx, &req)
 	if errors.Is(err, store.ErrDuplicate) {
@@ -130,7 +136,13 @@ func (h *APIHandler) AddEventLinks(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONRequest(w, r, &req) {
 		return
 	}
-	event, err := h.svc.AddLinks(r.Context(), chi.URLParam(r, "id"), req.UserName, req.Links)
+	var event *model.ChangeEvent
+	var err error
+	if identity, ok := authenticatedAPIIdentity(r); ok {
+		event, err = h.svc.AddLinksAs(r.Context(), chi.URLParam(r, "id"), identity, req.Links)
+	} else {
+		event, err = h.svc.AddLinks(r.Context(), chi.URLParam(r, "id"), req.UserName, req.Links)
+	}
 	if err != nil {
 		mapServiceError(r.Context(), w, err)
 		return
@@ -180,10 +192,13 @@ func (h *APIHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	ctx := r.Context()
 
-	// Use a default user name for API star toggles.
-	userName := "api"
-
-	metaEvent, err := h.svc.ToggleStar(ctx, id, userName)
+	var metaEvent *model.ChangeEvent
+	var err error
+	if identity, ok := authenticatedAPIIdentity(r); ok {
+		metaEvent, err = h.svc.ToggleStarAs(ctx, id, identity)
+	} else {
+		metaEvent, err = h.svc.ToggleStar(ctx, id, "api")
+	}
 	if err != nil {
 		mapServiceError(ctx, w, err)
 		return
@@ -193,7 +208,13 @@ func (h *APIHandler) ToggleStar(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) ToggleAlert(w http.ResponseWriter, r *http.Request) {
-	metaEvent, err := h.svc.ToggleAlert(r.Context(), chi.URLParam(r, "id"), "api")
+	var metaEvent *model.ChangeEvent
+	var err error
+	if identity, ok := authenticatedAPIIdentity(r); ok {
+		metaEvent, err = h.svc.ToggleAlertAs(r.Context(), chi.URLParam(r, "id"), identity)
+	} else {
+		metaEvent, err = h.svc.ToggleAlert(r.Context(), chi.URLParam(r, "id"), "api")
+	}
 	if err != nil {
 		mapServiceError(r.Context(), w, err)
 		return
@@ -206,12 +227,30 @@ func (h *APIHandler) CloseOperation(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONRequest(w, r, &req) {
 		return
 	}
-	event, err := h.svc.CloseOperation(r.Context(), chi.URLParam(r, "id"), req.UserName, req.Description)
+	var event *model.ChangeEvent
+	var err error
+	if identity, ok := authenticatedAPIIdentity(r); ok {
+		event, err = h.svc.CloseOperationAs(r.Context(), chi.URLParam(r, "id"), identity, req.Description)
+	} else {
+		event, err = h.svc.CloseOperation(r.Context(), chi.URLParam(r, "id"), req.UserName, req.Description)
+	}
 	if err != nil {
 		mapServiceError(r.Context(), w, err)
 		return
 	}
 	writeJSON(r.Context(), w, http.StatusCreated, event)
+}
+
+func authenticatedAPIIdentity(r *http.Request) (model.UserIdentity, bool) {
+	principal, ok := middleware.APIPrincipalFromContext(r.Context())
+	if !ok {
+		return model.UserIdentity{}, false
+	}
+	return model.UserIdentity{
+		Name:     principal.UserName,
+		Provider: principal.Provider,
+		Subject:  principal.Subject,
+	}, true
 }
 
 // mapServiceError maps service-layer errors to HTTP responses.

@@ -2,12 +2,77 @@ package middleware_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/sarah/go-prod-change-registry/internal/humanauth"
 	"github.com/sarah/go-prod-change-registry/internal/middleware"
 )
+
+func TestAuthWithTrustedIdentity(t *testing.T) {
+	t.Parallel()
+
+	want := humanauth.Principal{
+		Provider: "beyond",
+		Subject:  "alice@example.com",
+		UserName: "alice@example.com",
+	}
+	principalForRequest := func(r *http.Request) (humanauth.Principal, error) {
+		if r.Header.Get("X-Beyond-Email") == want.Subject {
+			return want, nil
+		}
+		return humanauth.Principal{}, errors.New("missing trusted identity")
+	}
+
+	var got humanauth.Principal
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ok bool
+		got, ok = middleware.APIPrincipalFromContext(r.Context())
+		if !ok {
+			t.Error("APIPrincipalFromContext() ok = false, want true")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	protected := middleware.AuthWithTrustedIdentity([]string{"legacy-token"}, true, nil, principalForRequest)(next)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", nil)
+	req.Header.Set("X-Beyond-Email", want.Subject)
+	rec := httptest.NewRecorder()
+	protected.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if got != want {
+		t.Errorf("context principal = %+v, want %+v", got, want)
+	}
+}
+
+func TestAuthWithTrustedIdentityRetainsLegacyTokenFallback(t *testing.T) {
+	t.Parallel()
+
+	principalForRequest := func(*http.Request) (humanauth.Principal, error) {
+		return humanauth.Principal{}, errors.New("no trusted identity")
+	}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := middleware.APIPrincipalFromContext(r.Context()); ok {
+			t.Error("legacy token unexpectedly established a trusted principal")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	protected := middleware.AuthWithTrustedIdentity([]string{"legacy-token"}, true, nil, principalForRequest)(next)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", nil)
+	req.Header.Set("Authorization", "Token legacy-token")
+	rec := httptest.NewRecorder()
+	protected.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+}
 
 func TestAuth(t *testing.T) {
 	t.Parallel()

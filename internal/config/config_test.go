@@ -337,6 +337,24 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
+	t.Run("Beyond allows API identity without legacy tokens", func(t *testing.T) {
+		clearOptionalEnv(t)
+		t.Setenv("PCR_API_TOKENS", "")
+		t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "beyond")
+		t.Setenv("PCR_OAUTH_CLIENT_ID", "")
+		t.Setenv("PCR_OAUTH_CLIENT_SECRET", "")
+		t.Setenv("PCR_ALLOWED_ORGS", "team-all")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "false")
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if len(cfg.APITokens) != 0 {
+			t.Fatalf("APITokens = %v, want none", cfg.APITokens)
+		}
+	})
+
 	t.Run("missing PCR_DATABASE_URL returns error", func(t *testing.T) {
 		t.Setenv("PCR_API_TOKENS", "tok1")
 		t.Setenv("PCR_DATABASE_URL", "")

@@ -321,12 +321,16 @@ func splitList(raw string) []string {
 	return values
 }
 
-// loadAPITokens reads PCR_API_TOKENS (required, comma-separated) and writes
-// the trimmed, non-empty tokens onto cfg. Returns an error if the var is
-// unset or contains no valid tokens.
+// loadAPITokens reads PCR_API_TOKENS (comma-separated) and writes the trimmed,
+// non-empty tokens onto cfg. Beyond deployments may omit legacy application
+// tokens because the trusted edge authenticates API clients and injects their
+// verified identity. Other providers still require at least one API token.
 func loadAPITokens(cfg *Config) error {
 	raw := os.Getenv("PCR_API_TOKENS")
 	if raw == "" {
+		if cfg.HumanAuthProvider == "beyond" {
+			return nil
+		}
 		return fmt.Errorf("PCR_API_TOKENS is required but not set")
 	}
 
@@ -338,6 +342,9 @@ func loadAPITokens(cfg *Config) error {
 		}
 	}
 	if len(tokens) == 0 {
+		if cfg.HumanAuthProvider == "beyond" {
+			return nil
+		}
 		return fmt.Errorf("PCR_API_TOKENS contains no valid tokens")
 	}
 

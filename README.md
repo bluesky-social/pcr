@@ -19,7 +19,7 @@ All configuration is via environment variables prefixed with `PCR_`.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `PCR_API_TOKENS` | Yes | -- | Comma-separated list of valid API tokens |
+| `PCR_API_TOKENS` | Except Beyond | -- | Comma-separated legacy API tokens; Beyond deployments may authenticate API clients at the trusted edge instead |
 | `PCR_HUMAN_AUTH_PROVIDER` | Yes | -- | Exactly one dashboard identity provider: `github`, `google`, `authentik`, or trusted proxy `beyond` |
 | `PCR_PUBLIC_URL` | Yes | -- | Canonical external origin used to build `/auth/callback`; HTTPS required except on loopback |
 | `PCR_OAUTH_CLIENT_ID` | Except Beyond | -- | OAuth client ID registered with the selected provider |
@@ -51,6 +51,27 @@ Set up a convenience alias:
 export PCR_TOKEN="your-token"
 alias pcr='curl -s -H "Authorization: Bearer $PCR_TOKEN" -H "Content-Type: application/json"'
 ```
+
+For a Beyond-fronted build or deployment producer, mint an Authentik app
+password and provide its `<email>:<key>` composite through the environment.
+`post-event` deliberately has no credential flag and does not send a
+caller-supplied user name:
+
+```bash
+# PCR_CREDENTIAL is supplied through the build system's masked secret mechanism.
+test -n "$PCR_CREDENTIAL"
+go run ./cmd/post-event \
+  --external-id "${BUILD_SYSTEM}-${BUILD_ID}" \
+  --event-type deployment \
+  --description "deployed ${SERVICE_NAME}" \
+  --tag env=prod \
+  --tag phase=end
+unset PCR_CREDENTIAL
+```
+
+Use a stable, unique `external_id`; retries then return the original event
+instead of creating duplicates. PCR derives event attribution from the
+identity Beyond verified for the credential.
 
 ### Endpoints
 
@@ -599,14 +620,18 @@ See [docs/testing.md](docs/testing.md) for the smoke-test commands and focused m
 
 ## Auth
 
-The server follows a zero-trust-by-default model. Dashboard routes always require a human session. For API routes, the default `PCR_REQUIRE_AUTH_READS=true` requires authentication for reads and writes; setting it to `false` permits unauthenticated API `GET` and `HEAD` requests while writes still require an explicit API token. Health, login, and static-asset routes are public as listed below.
+The server follows a zero-trust-by-default model. Dashboard routes always require a human session. For API routes, the default `PCR_REQUIRE_AUTH_READS=true` requires authentication for reads and writes; setting it to `false` permits unauthenticated API `GET` and `HEAD` requests while writes still require authentication. Health, login, and static-asset routes are public as listed below.
 
 API and human authentication are deliberately separate:
 
-1. **API clients:** `Authorization: Bearer <token>`, proxy-friendly `Authorization: Token <token>`, or the backwards-compatible `?token=` query parameter on `/api/v1/*`.
-2. **Dashboard users:** GitHub, Google, Authentik, or trusted Beyond identity, selected once at startup, followed by a locally signed PCR session cookie.
+1. **Beyond-fronted API clients:** Beyond validates an Authentik app password, strips the credential, and injects a verified identity that PCR rechecks before serving the API request.
+2. **Legacy or direct API clients:** `Authorization: Bearer <token>`, proxy-friendly `Authorization: Token <token>`, or the backwards-compatible `?token=` query parameter on `/api/v1/*`.
+3. **Dashboard users:** GitHub, Google, Authentik, or trusted Beyond identity, selected once at startup, followed by a locally signed PCR session cookie.
 
-API tokens cannot log into the dashboard, and provider OAuth tokens cannot authenticate PCR API routes.
+Legacy API tokens cannot log into the dashboard. When Beyond establishes an
+API identity, PCR ignores any `user_name` supplied by the client and records
+the verified lowercased email as `user_name`, `user_provider=beyond`, and the
+provider subject currently available from Beyond (also the email).
 
 ### Dashboard login
 
@@ -616,7 +641,7 @@ GitHub organization restriction verifies active membership with `read:org`. Goog
 
 Authentik uses OpenID Connect discovery at the configured per-provider issuer. PCR validates the ID-token signature, issuer, audience, expiry, and nonce. It uses signed `preferred_username`, falling back only to a verified email, and treats exact case-sensitive values in the signed `groups` claim as `PCR_ALLOWED_ORGS`. The Authentik provider must include scope mappings that emit these claims for the requested `openid email profile groups` scopes.
 
-With `PCR_HUMAN_AUTH_PROVIDER=beyond`, PCR performs no OAuth flow and requires `X-Beyond-Email`, with optional `X-Beyond-Name` and pipe-delimited `X-Beyond-Groups`, on every dashboard request. It lowercases the verified email and uses it as both the displayed user name and provider subject. The configured group check is exact and case-sensitive. This mode is safe only when PCR cannot be reached except through Beyond; otherwise callers can forge the headers. Kubernetes installers must apply the checked-in `k8s/networkpolicy-beyond.yaml` or an equivalent policy using their deployment's actual pod labels before exposing PCR. An email change intentionally creates a new PCR identity because the current Beyond header contract does not expose the OIDC `sub` claim.
+With `PCR_HUMAN_AUTH_PROVIDER=beyond`, PCR performs no OAuth flow and accepts `X-Beyond-Email`, with optional `X-Beyond-Name` and pipe-delimited `X-Beyond-Groups`, on dashboard and API requests. It lowercases the verified email and uses it as both the displayed user name and provider subject. The configured group check is exact and case-sensitive. This mode is safe only when PCR cannot be reached except through Beyond; otherwise callers can forge the headers. Kubernetes installers must apply the checked-in `k8s/networkpolicy-beyond.yaml` or an equivalent policy using their deployment's actual pod labels before exposing PCR. An email change intentionally creates a new PCR identity because the current Beyond header contract does not expose the OIDC `sub` claim.
 
 The signed session contains the provider subject and a mutable profile snapshot. Normal dashboard requests make no provider calls. OAuth provider profiles and policy refresh after the absolute `PCR_HUMAN_SESSION_DURATION` window. In Beyond mode, PCR binds every request to the current verified email and rechecks the current groups, so a changed edge identity cannot reuse a stale PCR session. Historical events retain their original name and subject snapshot.
 
@@ -632,7 +657,7 @@ All responses include `Referrer-Policy: no-referrer` and `X-Content-Type-Options
 
 ### Public routes
 
-Tokens are configured through the `PCR_API_TOKENS` environment variable (comma-separated). The following routes do not require authentication:
+Legacy tokens are configured through the `PCR_API_TOKENS` environment variable (comma-separated). The variable may be omitted in Beyond mode. The following routes do not require authentication:
 
 - `/livez` — dependency-free liveness check
 - `/readyz` — PostgreSQL-backed readiness check
