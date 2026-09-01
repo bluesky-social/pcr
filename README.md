@@ -43,35 +43,69 @@ All configuration is via environment variables prefixed with `PCR_`.
 | `PCR_SESSION_SECRET` | No | (random) | HMAC key for dashboard session cookies. **Must be at least 32 bytes if set.** When unset, an ephemeral 32-byte secret is generated; sessions then expire on every restart. See [Production session secret](#production-session-secret) below |
 | `PCR_COOKIE_SECURE` | No | `true` | Set the `Secure` flag on session cookies (requires HTTPS). Set to `false` for local dev without TLS |
 
-## API Reference
+## Command-line client
 
-Set up a convenience alias:
+Build the `pcr` client with release metadata:
 
 ```bash
-export PCR_TOKEN="your-token"
-alias pcr='curl -s -H "Authorization: Bearer $PCR_TOKEN" -H "Content-Type: application/json"'
+make build
+./bin/pcr version
 ```
 
-For a Beyond-fronted build or deployment producer, mint an Authentik app
-password and provide its `<email>:<key>` composite through the environment.
-`post-event` deliberately has no credential flag and does not send a
-caller-supplied user name:
+The client writes JSON to stdout by default; diagnostics go to stderr. Use
+`--output=jsonl` for one event per line or `--output=table` for interactive
+display. Its safe initial command surface covers reads, access checks, and
+idempotent event creation:
 
 ```bash
-# PCR_CREDENTIAL is supplied through the build system's masked secret mechanism.
+pcr events list --type deployment --tag env=prod
+pcr events get EVENT_ID
+pcr events annotations EVENT_ID
+pcr events activity EVENT_ID
+pcr current --team payments --severity sev0 --severity sev1
+pcr doctor
+```
+
+Run `pcr config init` to create the platform-default configuration file, then
+`pcr config set-credential` to read an Authentik
+`<email>:<app-password>` composite from a hidden terminal prompt. The file is
+written atomically with mode `0600`. `pcr config show` reports only whether a
+credential is configured; it never prints any part of the value.
+
+For CI, inject the user-bound credential through the build system's masked
+secret mechanism. Do not put it in command arguments:
+
+```bash
+# PCR_CREDENTIAL is a masked secret. A mint purpose label is bookkeeping, not
+# a PCR-only authorization scope; revoke the app password when it is no longer needed.
 test -n "$PCR_CREDENTIAL"
-go run ./cmd/post-event \
+pcr events create \
   --external-id "${BUILD_SYSTEM}-${BUILD_ID}" \
-  --event-type deployment \
+  --type deployment \
   --description "deployed ${SERVICE_NAME}" \
   --tag env=prod \
   --tag phase=end
 unset PCR_CREDENTIAL
 ```
 
-Use a stable, unique `external_id`; retries then return the original event
-instead of creating duplicates. PCR derives event attribution from the
-identity Beyond verified for the credential.
+Use a stable, unique external ID. A retry returns the original event rather
+than creating a duplicate, and PCR derives attribution from the identity
+Beyond verified for the credential. The target URL can be selected with
+`--url`, `PCR_URL`, or the config file, in that order. The credential can come
+from `PCR_CREDENTIAL` or the protected config file. Run `pcr config path` to
+print the effective platform path.
+
+Toggle, link, and close mutations remain API-only until they have retry-safe
+desired-state semantics suitable for unattended automation.
+
+## API Reference
+
+Set up a convenience alias:
+
+```bash
+export PCR_TOKEN="your-token"
+alias pcr-api='curl -s -H "Authorization: Bearer $PCR_TOKEN" -H "Content-Type: application/json"'
+```
 
 ### Endpoints
 
@@ -160,7 +194,7 @@ curl -s http://localhost:8080/readyz
 **Create an event:**
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "user_name": "alice",
   "event_type": "deployment",
   "description": "Deploy payments-service v2.4.1",
@@ -176,13 +210,13 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 **List events with filters:**
 
 ```bash
-pcr "http://localhost:8080/api/v1/events?type=deployment&start_after=2026-03-30T00:00:00Z&limit=10"
+pcr-api "http://localhost:8080/api/v1/events?type=deployment&start_after=2026-03-30T00:00:00Z&limit=10"
 ```
 
 **Window query (incident correlation):**
 
 ```bash
-pcr "http://localhost:8080/api/v1/events?around=2026-03-31T14:32:00Z&window=30m"
+pcr-api "http://localhost:8080/api/v1/events?around=2026-03-31T14:32:00Z&window=30m"
 ```
 
 This returns events from 30 minutes before the given timestamp (inclusive) to 30 minutes after it (exclusive) -- useful for answering "what changed around the time of an incident?"
@@ -190,27 +224,27 @@ This returns events from 30 minutes before the given timestamp (inclusive) to 30
 **List top-level events only (exclude meta-events):**
 
 ```bash
-pcr "http://localhost:8080/api/v1/events?top_level=true"
+pcr-api "http://localhost:8080/api/v1/events?top_level=true"
 ```
 
 **List current work visible to a team:**
 
 ```bash
-pcr "http://localhost:8080/api/v1/current?for_team=payments"
-pcr "http://localhost:8080/api/v1/current?for_team=payments&severity=sev0&severity=sev1"
-pcr "http://localhost:8080/api/v1/current?scope=site"
+pcr-api "http://localhost:8080/api/v1/current?for_team=payments"
+pcr-api "http://localhost:8080/api/v1/current?for_team=payments&severity=sev0&severity=sev1"
+pcr-api "http://localhost:8080/api/v1/current?scope=site"
 ```
 
 **Get a single event:**
 
 ```bash
-pcr http://localhost:8080/api/v1/events/abc123
+pcr-api http://localhost:8080/api/v1/events/abc123
 ```
 
 **Get annotations for an event (derived star/alert state):**
 
 ```bash
-pcr http://localhost:8080/api/v1/events/abc123/annotations
+pcr-api http://localhost:8080/api/v1/events/abc123/annotations
 ```
 
 Returns:
@@ -222,7 +256,7 @@ Returns:
 **Toggle star:**
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events/abc123/star
+pcr-api -X POST http://localhost:8080/api/v1/events/abc123/star
 ```
 
 This creates a `star` or `unstar` meta-event depending on the current state.
@@ -230,7 +264,7 @@ This creates a `star` or `unstar` meta-event depending on the current state.
 **Append links to an existing event:**
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events/abc123/links -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events/abc123/links -d '{
   "user_name": "alice",
   "links": [
     {"label": "PagerDuty incident", "url": "https://example.pagerduty.com/incidents/P123"},
@@ -244,19 +278,19 @@ This creates one immutable `link` annotation. The detail view aggregates origina
 **List event activity:**
 
 ```bash
-pcr http://localhost:8080/api/v1/events/abc123/activity
+pcr-api http://localhost:8080/api/v1/events/abc123/activity
 ```
 
 **Toggle alert:**
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events/abc123/alert
+pcr-api -X POST http://localhost:8080/api/v1/events/abc123/alert
 ```
 
 **Close an active operation:**
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events/abc123/close -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events/abc123/close -d '{
   "user_name": "release-manager",
   "description": "Rollout completed and verified"
 }'
@@ -267,7 +301,7 @@ The server derives the event type and correlation identifier from the start even
 **List every currently alerted event:**
 
 ```bash
-pcr "http://localhost:8080/api/v1/events?alerted=true&top_level=true"
+pcr-api "http://localhost:8080/api/v1/events?alerted=true&top_level=true"
 ```
 
 This API query has no implicit time bound. The dashboard's Alerts view does have the dashboard's default 24-hour event-time range unless a different range is selected.
@@ -321,7 +355,7 @@ For an incident-oriented event, `alert` can represent an active incident and `cl
 After creating a top-level event, open its alert state:
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "parent_id": "original-event-id",
   "event_type": "alert",
   "user_name": "on-call",
@@ -332,7 +366,7 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 Resolve it by appending the opposite transition:
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "parent_id": "original-event-id",
   "event_type": "clear-alert",
   "user_name": "on-call",
@@ -346,7 +380,7 @@ A deployment lifecycle (or any multi-phase operation) is recorded as separate im
 
 ```bash
 # Deploy started
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "user_name": "alice",
   "description": "deploy v1.2 started",
@@ -354,7 +388,7 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 }'
 
 # Deploy completed (separate event, same change_id tag)
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "event_type": "deployment",
   "user_name": "alice",
   "description": "deploy v1.2 completed",
@@ -365,7 +399,7 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 Query by tag to see the full lifecycle:
 
 ```bash
-pcr "http://localhost:8080/api/v1/events?tag=change_id:deploy-abc123"
+pcr-api "http://localhost:8080/api/v1/events?tag=change_id:deploy-abc123"
 ```
 
 History retains both rows. Current includes the start until a top-level end event has the same event type and correlation identifier. Exact lowercase `phase=start` and `phase=end` values participate. If both identifier tags exist, non-empty `change_id` takes precedence; an empty `change_id` falls back to non-empty `deploy_id`. Events without a usable identifier remain in History but cannot enter Current.
@@ -410,7 +444,7 @@ Callers should construct `external_id` from a combination of the source system a
 
 ```bash
 # First request -- creates the event (201 Created)
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "external_id": "github-actions-12345-deploy",
   "user_name": "ci-bot",
   "event_type": "deployment",
@@ -419,7 +453,7 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 }'
 
 # Retry (network blip, webhook redelivery, etc.) -- returns the same event (200 OK)
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "external_id": "github-actions-12345-deploy",
   "user_name": "ci-bot",
   "event_type": "deployment",

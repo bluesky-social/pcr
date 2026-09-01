@@ -48,11 +48,9 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 			sort.Strings(out)
 			return out
 		},
-		"tagFilterURL": func(key, value string) string {
-			q := url.Values{}
-			q.Set("tag", key+":"+value)
-			return "/?" + q.Encode()
-		},
+		"tagFilterURL":          tagFilterURL,
+		"dashboardTagFilterURL": dashboardTagFilterURL,
+		"dashboardTagRemoveURL": dashboardTagRemoveURL,
 		"tagValue": func(tags map[string]string, key string) string {
 			return tags[key]
 		},
@@ -258,6 +256,96 @@ func dashboardURL(view, team, rangeValue string) string {
 	}
 	if rangeValue != "" {
 		q.Set("range", rangeValue)
+	}
+	return "/?" + q.Encode()
+}
+
+// tagFilterURL builds a context-free dashboard link for tags shown outside
+// the dashboard, such as on an event detail page.
+func tagFilterURL(key, value string) string {
+	q := url.Values{}
+	q.Set("tag", key+":"+value)
+	return dashboardQueryURL(q)
+}
+
+// dashboardFilterQuery reconstructs the dashboard's understood filter state.
+// Building this from parsed filters, instead of copying the request query,
+// prevents unrelated or sensitive query parameters from being reflected into
+// tag links.
+func dashboardFilterQuery(filters dashboardFilters) url.Values {
+	q := url.Values{}
+	if filters.View != "" {
+		q.Set("view", filters.View)
+	}
+	if filters.Team != "" {
+		q.Set("team", filters.Team)
+	}
+	if filters.Range != "" {
+		q.Set("range", filters.Range)
+	}
+	if filters.StartAfter != "" {
+		q.Set("start_after", filters.StartAfter)
+	}
+	if filters.StartBefore != "" {
+		q.Set("start_before", filters.StartBefore)
+	}
+	if filters.EventType != "" {
+		q.Set("type", filters.EventType)
+	}
+	if filters.UserName != "" {
+		q.Set("user", filters.UserName)
+	}
+	for _, scope := range filters.Scopes {
+		q.Add("scope", scope)
+	}
+	for _, severity := range filters.Severities {
+		q.Add("severity", severity)
+	}
+	for _, tag := range filters.Tags {
+		q.Add("tag", tag)
+	}
+	return q
+}
+
+// dashboardTagFilterURL adds an exact tag filter without discarding the
+// dashboard's other filters. Since ListParams supports one value per tag key,
+// selecting a new value replaces an existing value with the same key.
+func dashboardTagFilterURL(filters dashboardFilters, key, value string) string {
+	q := dashboardFilterQuery(filters)
+	q.Del("tag")
+	for _, tag := range filters.Tags {
+		existingKey, _, ok := strings.Cut(tag, ":")
+		if ok && existingKey != key {
+			q.Add("tag", tag)
+		}
+	}
+	q.Add("tag", key+":"+value)
+	if key == "team" {
+		q.Set("team", value)
+	}
+	return dashboardQueryURL(q)
+}
+
+// dashboardTagRemoveURL removes one active tag while preserving the remaining
+// dashboard filters. Removing the tag that established team context clears
+// that context as well, so the summary does not continue to show that team.
+func dashboardTagRemoveURL(filters dashboardFilters, removeTag string) string {
+	q := dashboardFilterQuery(filters)
+	q.Del("tag")
+	for _, tag := range filters.Tags {
+		if tag != removeTag {
+			q.Add("tag", tag)
+		}
+	}
+	if key, value, ok := strings.Cut(removeTag, ":"); ok && key == "team" && filters.Team == value {
+		q.Del("team")
+	}
+	return dashboardQueryURL(q)
+}
+
+func dashboardQueryURL(q url.Values) string {
+	if len(q) == 0 {
+		return "/"
 	}
 	return "/?" + q.Encode()
 }

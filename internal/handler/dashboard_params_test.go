@@ -152,6 +152,28 @@ func TestParseDashboardRequest(t *testing.T) {
 			t.Errorf("alerts params = %+v filters = %+v", p, f)
 		}
 	})
+
+	t.Run("team tag establishes displayed team context", func(t *testing.T) {
+		t.Parallel()
+
+		r := httptest.NewRequestWithContext(
+			t.Context(),
+			http.MethodGet,
+			"/?team=other&tag=team%3Aplatform",
+			nil,
+		)
+		p, f := parseDashboardRequest(r)
+
+		if f.Team != "platform" {
+			t.Errorf("filters.Team = %q, want platform", f.Team)
+		}
+		if p.Tags["team"] != "platform" {
+			t.Errorf("params.Tags[team] = %q, want platform", p.Tags["team"])
+		}
+		if f.View != "history" {
+			t.Errorf("filters.View = %q, want history", f.View)
+		}
+	})
 }
 
 func TestParseDashboardRange(t *testing.T) {
@@ -557,4 +579,98 @@ func TestCurrentPresetURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDashboardTagFilterURL(t *testing.T) {
+	t.Parallel()
+
+	filters := dashboardFilters{
+		View:        "history",
+		Team:        "old-team",
+		Range:       "custom",
+		StartAfter:  "2026-08-31T09:00",
+		StartBefore: "2026-09-01T09:00",
+		EventType:   "deployment",
+		UserName:    "alice",
+		Scopes:      []string{"site"},
+		Severities:  []string{"sev1", "sev2"},
+		Tags:        []string{"team:old-team", "env:prod"},
+	}
+
+	parsed, err := url.Parse(dashboardTagFilterURL(filters, "team", "platform"))
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	query := parsed.Query()
+
+	for key, want := range map[string]string{
+		"view":         "history",
+		"team":         "platform",
+		"range":        "custom",
+		"start_after":  "2026-08-31T09:00",
+		"start_before": "2026-09-01T09:00",
+		"type":         "deployment",
+		"user":         "alice",
+	} {
+		if got := query.Get(key); got != want {
+			t.Errorf("query.Get(%q) = %q, want %q", key, got, want)
+		}
+	}
+	if !slices.Equal(query["scope"], []string{"site"}) {
+		t.Errorf("scopes = %v, want [site]", query["scope"])
+	}
+	if !slices.Equal(query["severity"], []string{"sev1", "sev2"}) {
+		t.Errorf("severities = %v, want [sev1 sev2]", query["severity"])
+	}
+	if !slices.Equal(query["tag"], []string{"env:prod", "team:platform"}) {
+		t.Errorf("tags = %v, want [env:prod team:platform]", query["tag"])
+	}
+}
+
+func TestDashboardTagRemoveURL(t *testing.T) {
+	t.Parallel()
+
+	filters := dashboardFilters{
+		View:       "history",
+		Team:       "platform",
+		Range:      "24h",
+		EventType:  "deployment",
+		Tags:       []string{"team:platform", "env:prod"},
+		Severities: []string{"sev1"},
+	}
+
+	t.Run("non-team tag preserves team and other filters", func(t *testing.T) {
+		t.Parallel()
+
+		parsed, err := url.Parse(dashboardTagRemoveURL(filters, "env:prod"))
+		if err != nil {
+			t.Fatalf("url.Parse: %v", err)
+		}
+		query := parsed.Query()
+		if query.Get("team") != "platform" || query.Get("type") != "deployment" || query.Get("range") != "24h" {
+			t.Errorf("other filters were not preserved: %v", query)
+		}
+		if !slices.Equal(query["tag"], []string{"team:platform"}) {
+			t.Errorf("tags = %v, want [team:platform]", query["tag"])
+		}
+	})
+
+	t.Run("team tag also clears matching team context", func(t *testing.T) {
+		t.Parallel()
+
+		parsed, err := url.Parse(dashboardTagRemoveURL(filters, "team:platform"))
+		if err != nil {
+			t.Fatalf("url.Parse: %v", err)
+		}
+		query := parsed.Query()
+		if query.Has("team") {
+			t.Errorf("team context was not cleared: %v", query)
+		}
+		if !slices.Equal(query["tag"], []string{"env:prod"}) {
+			t.Errorf("tags = %v, want [env:prod]", query["tag"])
+		}
+		if query.Get("view") != "history" || query.Get("range") != "24h" {
+			t.Errorf("view/range were not preserved: %v", query)
+		}
+	})
 }

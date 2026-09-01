@@ -159,7 +159,7 @@
 {{if .Filters.Tags}}
 <div class="active-filters instrument-housing">
     <span>Filtering by tags:</span>
-    {{range .Filters.Tags}}<span class="badge badge-active">{{.}} <a href="/" class="badge-remove">&times;</a></span>{{end}}
+    {{range .Filters.Tags}}<span class="badge badge-active">{{.}} <a href="{{dashboardTagRemoveURL $.Filters .}}" class="badge-remove">&times;</a></span>{{end}}
 </div>
 {{end}}
 
@@ -196,7 +196,7 @@
                 {{else}}
                 <td><a href="/events/{{.ID}}">{{formatTime .Timestamp}}</a></td>
                 <td class="col-user">{{.UserName}}</td><td>{{.EventType}}</td><td><a href="/events/{{.ID}}">{{.Description}}</a>{{if .Links}} <span class="event-link-count">{{len .Links}} links</span>{{end}}</td>
-                <td class="col-tags">{{range $k, $v := .Tags}}<a href="{{tagFilterURL $k $v}}" class="badge badge-link">{{$k}}={{$v}}</a>{{end}}</td>
+                <td class="col-tags">{{range $k, $v := .Tags}}<a href="{{dashboardTagFilterURL $.Filters $k $v}}" class="badge badge-link">{{$k}}={{$v}}</a>{{end}}</td>
                 {{end}}
             </tr>
             {{end}}

@@ -257,6 +257,66 @@ func TestSeededDashboardViews(t *testing.T) {
 	}
 }
 
+func TestSeededDashboardTeamTagFilters(t *testing.T) {
+	t.Parallel()
+
+	dashboard := seededDashboardRouter(t)
+	tests := []struct {
+		team     string
+		included []string
+		excluded []string
+	}{
+		{
+			team: "payments",
+			included: []string{
+				"Checkout risk model advanced to cohort 40%",
+				"Primary card vault key rotation",
+			},
+			excluded: []string{
+				"West coast edge traffic evacuation",
+				"Ingress controller fleet replacement",
+			},
+		},
+		{
+			team: "platform",
+			included: []string{
+				"West coast edge traffic evacuation",
+				"Ingress controller fleet replacement",
+			},
+			excluded: []string{
+				"Checkout risk model advanced to cohort 40%",
+				"Primary card vault key rotation",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.team, func(t *testing.T) {
+			t.Parallel()
+
+			page := renderDashboard(t, dashboard, "/?tag="+url.QueryEscape("team:"+tc.team))
+			if want := "<span>Team</span><strong>" + tc.team + "</strong>"; !strings.Contains(page, want) {
+				t.Errorf("team summary does not contain %q", want)
+			}
+			if want := "Filtering by tags:</span>\n    <span class=\"badge badge-active\">team:" + tc.team; !strings.Contains(page, want) {
+				t.Errorf("active-filter display does not contain %q", want)
+			}
+
+			table := dashboardTableBody(t, page)
+			for _, want := range tc.included {
+				if !strings.Contains(table, want) {
+					t.Errorf("%s team table does not contain %q", tc.team, want)
+				}
+			}
+			for _, unwanted := range tc.excluded {
+				if strings.Contains(table, unwanted) {
+					t.Errorf("%s team table unexpectedly contains %q", tc.team, unwanted)
+				}
+			}
+		})
+	}
+}
+
 func TestRecordChangeFormTreatsSQLAsData(t *testing.T) {
 	t.Parallel()
 

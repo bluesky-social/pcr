@@ -54,6 +54,12 @@ func parseDashboardRequest(r *http.Request) (model.ListParams, dashboardFilters)
 			params.UserName = v
 		}
 		parseDashboardTags(q, &params, &filters)
+		// A team tag is still an exact history filter, but it also establishes
+		// the team context displayed by the dashboard and carried into other
+		// views. Prefer it over a conflicting standalone team parameter.
+		if team := params.Tags["team"]; team != "" {
+			filters.Team = team
+		}
 	}
 
 	params.Limit = parseBoundedInt(q, "limit", 1, model.DashboardLimit)

@@ -1,12 +1,15 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -ldflags "-X main.Version=$(VERSION)"
+SOURCE_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+PCR_LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(SOURCE_COMMIT) -X main.buildDate=$(BUILD_DATE)"
 
 .DEFAULT_GOAL := build
 
 .PHONY: build clean test test-short coverage lint fmt run vet audit smoke smoke-docker seed-demo
 
 build:
-	go build $(LDFLAGS) -o bin/pcr-server ./cmd/server
+	go build -o bin/pcr-server ./cmd/server
+	go build $(PCR_LDFLAGS) -o bin/pcr ./cmd/pcr
 
 clean:
 	rm -rf bin/
