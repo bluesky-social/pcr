@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
-	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/humanauth"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	"github.com/sarah/go-prod-change-registry/internal/router"
-	"github.com/sarah/go-prod-change-registry/internal/service"
-	"github.com/sarah/go-prod-change-registry/internal/store"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/handler"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/router"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/service"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/store"
 )
 
 // mockStore implements store.ChangeStore with configurable function fields.
@@ -212,6 +212,126 @@ func TestBeyondLogoutDoesNotRequireCurrentGroupMembership(t *testing.T) {
 	}
 	if cookies := rec.Result().Cookies(); len(cookies) != 1 || cookies[0].MaxAge >= 0 {
 		t.Fatalf("POST /logout cookies = %#v, want one deletion cookie", cookies)
+	}
+}
+
+func TestBeyondIdentityAuthenticatesAPIAndControlsAttribution(t *testing.T) {
+	t.Parallel()
+
+	beyond := humanauth.NewBeyond(humanauth.ProviderOptions{AllowedOrgs: []string{"engineering"}})
+	humanAuthH := handler.NewBeyondHumanAuthHandler(beyond, handler.HumanAuthOptions{
+		SessionSecret: []byte("test-session-secret"), SessionDuration: time.Hour,
+	})
+	r, ms := newTestRouterWithHumanAuth(t, true, humanAuthH, "beyond")
+
+	var captured *model.ChangeEvent
+	ms.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+		copy := *event
+		captured = &copy
+		return &copy, nil
+	}
+
+	body := `{"user_name":"forged-actor","event_type":"deployment","description":"deploy v1.3"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Beyond-Email", "Alice@Example.com")
+	req.Header.Set("X-Beyond-Name", "Alice Example")
+	req.Header.Set("X-Beyond-Groups", "engineering|team-all")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("store did not receive an event")
+	}
+	if captured.UserName != "alice@example.com" || captured.UserProvider != "beyond" || captured.UserSubject != "alice@example.com" {
+		t.Errorf("stored identity = %q/%q/%q, want verified Beyond identity", captured.UserName, captured.UserProvider, captured.UserSubject)
+	}
+}
+
+func TestBeyondIdentityMakesAPIUserNameOptional(t *testing.T) {
+	t.Parallel()
+
+	beyond := humanauth.NewBeyond(humanauth.ProviderOptions{AllowedOrgs: []string{"engineering"}})
+	humanAuthH := handler.NewBeyondHumanAuthHandler(beyond, handler.HumanAuthOptions{
+		SessionSecret: []byte("test-session-secret"), SessionDuration: time.Hour,
+	})
+	r, ms := newTestRouterWithHumanAuth(t, true, humanAuthH, "beyond")
+
+	var captured *model.ChangeEvent
+	ms.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+		copy := *event
+		captured = &copy
+		return &copy, nil
+	}
+
+	body := `{"external_id":"build-123","event_type":"deployment","description":"deploy v1.3"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Beyond-Email", "alice@example.com")
+	req.Header.Set("X-Beyond-Groups", "engineering")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	if captured == nil || captured.UserName != "alice@example.com" {
+		t.Fatalf("stored event = %+v, want identity-derived user name", captured)
+	}
+}
+
+func TestBeyondIdentityAPIRejectsWrongGroup(t *testing.T) {
+	t.Parallel()
+
+	beyond := humanauth.NewBeyond(humanauth.ProviderOptions{AllowedOrgs: []string{"engineering"}})
+	humanAuthH := handler.NewBeyondHumanAuthHandler(beyond, handler.HumanAuthOptions{
+		SessionSecret: []byte("test-session-secret"), SessionDuration: time.Hour,
+	})
+	r, ms := newTestRouterWithHumanAuth(t, true, humanAuthH, "beyond")
+
+	storeCalled := false
+	ms.createFn = func(_ context.Context, event *model.ChangeEvent) (*model.ChangeEvent, error) {
+		storeCalled = true
+		return event, nil
+	}
+
+	body := `{"event_type":"deployment","description":"deploy v1.3"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Beyond-Email", "alice@example.com")
+	req.Header.Set("X-Beyond-Groups", "finance")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body = %s", rec.Code, rec.Body.String())
+	}
+	if storeCalled {
+		t.Fatal("store was called for a disallowed Beyond identity")
+	}
+}
+
+func TestBeyondAPIRetainsLegacyTokenDuringMigration(t *testing.T) {
+	t.Parallel()
+
+	beyond := humanauth.NewBeyond(humanauth.ProviderOptions{AllowedOrgs: []string{"engineering"}})
+	humanAuthH := handler.NewBeyondHumanAuthHandler(beyond, handler.HumanAuthOptions{
+		SessionSecret: []byte("test-session-secret"), SessionDuration: time.Hour,
+	})
+	r, _ := newTestRouterWithHumanAuth(t, true, humanAuthH, "beyond")
+
+	body := `{"user_name":"legacy-producer","event_type":"deployment","description":"deploy v1.3"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/events", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Token "+testToken)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
 }
 

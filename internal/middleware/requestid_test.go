@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
 )
 
 // uuidRegex matches a UUID v4 string (lowercase hex with hyphens).

@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/sarah/go-prod-change-registry/migrations"
+	"github.com/sarahmaeve/go-prod-change-registry/migrations"
 )
 
 // PoolOptions controls the bounded connection pool used by the server.

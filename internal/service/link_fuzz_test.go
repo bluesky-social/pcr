@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 func FuzzValidateLinks(f *testing.F) {

@@ -15,9 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
-	"github.com/sarah/go-prod-change-registry/migrations"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
+	postgresdb "github.com/sarahmaeve/go-prod-change-registry/internal/postgres"
+	"github.com/sarahmaeve/go-prod-change-registry/migrations"
 )
 
 func TestCurrentQueryPlanUsesTagIndexes(t *testing.T) {

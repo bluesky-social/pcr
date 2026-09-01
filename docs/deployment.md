@@ -47,8 +47,10 @@ Beyond authenticates the browser and injects `X-Beyond-Email`,
 binds its local CSRF session to the verified email on every request. PCR OAuth
 client credentials and `/auth/callback` are unused in this mode.
 
-Add PCR to Beyond and let opaque PCR API credentials bypass edge login using
-the non-Bearer scheme that PCR validates itself:
+Add PCR to Beyond with `credential_auth`. Beyond validates the minted
+`<email>:<app-password>` against Authentik on every API request, applies the
+same group gate as browser SSO, strips the live credential, and injects the
+verified identity PCR uses for authorization and event attribution:
 
 ```yaml
 applications:
@@ -56,14 +58,21 @@ applications:
     upstream: http://pcr-server.pcr.svc.cluster.local:8080
     host: changes.example.com
     allowed_groups: [example-group]
-    passthrough_auth_schemes: [Token]
+    credential_auth:
+      token_url: http://authentik-server.authentik.svc.cluster.local/application/o/token/
+      client_id: existing-public-m2m-client-id
 ```
 
-External API clients then send `Authorization: Token <PCR-token>`. Beyond
-strips any caller-supplied `X-Beyond-*` values and forwards the credential;
-PCR remains the API authentication boundary. `Bearer` continues to work when
-calling PCR directly, but a sessionless Bearer request through Beyond is
-reserved for Beyond's OIDC JWT handling.
+External API clients then send `Authorization: Bearer <email>:<app-password>`
+or `x-api-key: <email>:<app-password>`. Beyond strips caller-supplied
+`X-Beyond-*` values before injecting the verified identity, and the credential
+never reaches PCR. The mint purpose is bookkeeping only and does not restrict
+which allowed Beyond service can validate that app password.
+
+Requests without a credential still use Beyond's normal browser SSO path, so
+this does not replace or disable PCR's dashboard login. A Beyond deployment
+may omit `PCR_API_TOKENS`; retain it temporarily only when migrating existing
+clients that still call PCR directly or use the old `Token` passthrough route.
 
 Header trust requires network isolation. Do not expose PCR through another
 Ingress, LoadBalancer, NodePort, or generally reachable ClusterIP path. Apply a
@@ -338,7 +347,7 @@ All methods use the same environment variables. Key settings:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `PCR_API_TOKENS` | Yes | -- | Comma-separated API tokens |
+| `PCR_API_TOKENS` | Except Beyond | -- | Comma-separated legacy API tokens; optional when Beyond authenticates API clients |
 | `PCR_HUMAN_AUTH_PROVIDER` | Yes | -- | Exactly one of `github`, `google`, `authentik`, or `beyond` |
 | `PCR_PUBLIC_URL` | Yes | -- | Canonical external origin; OAuth provider callback is `<value>/auth/callback` |
 | `PCR_OAUTH_CLIENT_ID` | Except Beyond | -- | Selected provider's OAuth client ID |

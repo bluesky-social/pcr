@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // paramError carries a 400-level error code and message produced while parsing

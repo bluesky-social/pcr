@@ -3,7 +3,7 @@ package handler
 import (
 	"net/url"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 func parseCurrentParams(q url.Values) (model.CurrentParams, *paramError) {

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/fixture"
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/fixture"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 type recordingCreator struct {

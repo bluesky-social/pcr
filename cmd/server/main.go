@@ -13,13 +13,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
-	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/humanauth"
-	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
-	"github.com/sarah/go-prod-change-registry/internal/router"
-	"github.com/sarah/go-prod-change-registry/internal/service"
-	postgresstore "github.com/sarah/go-prod-change-registry/internal/store/postgres"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/handler"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
+	postgresdb "github.com/sarahmaeve/go-prod-change-registry/internal/postgres"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/router"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/service"
+	postgresstore "github.com/sarahmaeve/go-prod-change-registry/internal/store/postgres"
 )
 
 func main() {

@@ -8,7 +8,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // Event is one fixture record. Ref names the created event for later ParentRef lookups.

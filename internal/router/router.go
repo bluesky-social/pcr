@@ -7,10 +7,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
-	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
-	"github.com/sarah/go-prod-change-registry/web"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/handler"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/web"
 )
 
 // New creates and configures a chi.Mux with all application routes and middleware.
@@ -35,10 +35,18 @@ func New(apiHandler *handler.APIHandler, dashHandler *handler.DashboardHandler, 
 	r.Get("/auth/callback", humanAuthHandler.Callback)
 
 	// API routes accept explicit tokens only. Browser session cookies are scoped
-	// to dashboard routes so ambient cookie authority cannot authenticate API
-	// writes that do not carry dashboard CSRF tokens.
+	// to dashboard routes so PCR's own ambient cookie authority cannot
+	// authenticate API writes that do not carry dashboard CSRF tokens. In
+	// Beyond mode, the edge may instead authenticate an app password and inject
+	// a verified request identity; the NetworkPolicy is part of that trust
+	// boundary.
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(cfg.APITokens, cfg.RequireAuthReads, nil))
+		r.Use(middleware.AuthWithTrustedIdentity(
+			cfg.APITokens,
+			cfg.RequireAuthReads,
+			nil,
+			humanAuthHandler.TrustedRequestPrincipal(),
+		))
 
 		r.Get("/api/v1/current", apiHandler.ListCurrent)
 		r.Get("/api/v1/events", apiHandler.ListEvents)

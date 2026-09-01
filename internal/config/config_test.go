@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
 )
 
 // validSessionSecret is a 32-byte test value that satisfies the minimum
@@ -334,6 +334,24 @@ func TestLoad(t *testing.T) {
 		_, err := config.Load()
 		if err == nil {
 			t.Fatal("expected error when PCR_API_TOKENS is not set")
+		}
+	})
+
+	t.Run("Beyond allows API identity without legacy tokens", func(t *testing.T) {
+		clearOptionalEnv(t)
+		t.Setenv("PCR_API_TOKENS", "")
+		t.Setenv("PCR_HUMAN_AUTH_PROVIDER", "beyond")
+		t.Setenv("PCR_OAUTH_CLIENT_ID", "")
+		t.Setenv("PCR_OAUTH_CLIENT_SECRET", "")
+		t.Setenv("PCR_ALLOWED_ORGS", "team-all")
+		t.Setenv("PCR_HUMAN_AUTH_ALLOW_ANY", "false")
+
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if len(cfg.APITokens) != 0 {
+			t.Fatalf("APITokens = %v, want none", cfg.APITokens)
 		}
 	})
 

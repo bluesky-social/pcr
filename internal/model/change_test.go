@@ -3,7 +3,7 @@ package model_test
 import (
 	"testing"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 func TestEffectiveLimit(t *testing.T) {

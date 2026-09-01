@@ -1,4 +1,4 @@
-module github.com/sarah/go-prod-change-registry
+module github.com/sarahmaeve/go-prod-change-registry
 
 go 1.27.0
 

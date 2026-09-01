@@ -7,7 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
 )
+
+type apiPrincipalContextKey struct{}
 
 // authErrorResponse is the JSON structure returned on authentication failure.
 type authErrorResponse struct {
@@ -27,9 +31,17 @@ type authErrorDetail struct {
 // Cognitive complexity is in the auth-method fallback chain (bearer header,
 // session cookie, query param) plus the read-vs-write toggle. Each branch
 // is straightforward; consolidating them would obscure the intent.
-//
-//nolint:gocognit // auth fallback chain is intentional; refactoring would harm clarity
 func Auth(tokens []string, requireForReads bool, sessionSecret []byte) func(http.Handler) http.Handler {
+	return AuthWithTrustedIdentity(tokens, requireForReads, sessionSecret, nil)
+}
+
+// AuthWithTrustedIdentity accepts either a trusted-proxy identity or one of
+// the configured opaque API tokens. The proxy identity is attached to the
+// request context so write handlers can derive immutable event attribution
+// from authentication rather than caller-supplied JSON.
+//
+//nolint:gocognit // The explicit auth fallback chain is easier to audit than indirect dispatch.
+func AuthWithTrustedIdentity(tokens []string, requireForReads bool, sessionSecret []byte, principalForRequest RequestPrincipal) func(http.Handler) http.Handler {
 	// Store tokens as byte slices for constant-time comparison.
 	validTokens := make([][]byte, len(tokens))
 	for i, t := range tokens {
@@ -42,6 +54,18 @@ func Auth(tokens []string, requireForReads bool, sessionSecret []byte) func(http
 			if !requireForReads && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 				next.ServeHTTP(w, r)
 				return
+			}
+
+			// Beyond strips the app password after validating it and injects its
+			// verified identity headers instead. Network isolation is therefore
+			// part of this trust boundary: callers must not be able to reach PCR
+			// without the trusted proxy.
+			if principalForRequest != nil {
+				if principal, err := principalForRequest(r); err == nil {
+					ctx := context.WithValue(r.Context(), apiPrincipalContextKey{}, principal)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
 			}
 
 			// Check an explicit API credential. Token is supported for deployments
@@ -68,6 +92,14 @@ func Auth(tokens []string, requireForReads bool, sessionSecret []byte) func(http
 			writeAuthError(r.Context(), w, "missing or malformed Authorization header")
 		})
 	}
+}
+
+// APIPrincipalFromContext returns the identity established by
+// AuthWithTrustedIdentity. Opaque legacy API tokens do not carry an identity
+// and therefore return ok=false.
+func APIPrincipalFromContext(ctx context.Context) (humanauth.Principal, bool) {
+	principal, ok := ctx.Value(apiPrincipalContextKey{}).(humanauth.Principal)
+	return principal, ok
 }
 
 // SecurityHeaders returns middleware that sets common security headers on all responses.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	"github.com/sarah/go-prod-change-registry/internal/service"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/service"
 )
 
 func TestCreatePreservesVerifiedIdentity(t *testing.T) {

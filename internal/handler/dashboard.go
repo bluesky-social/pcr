@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	"github.com/sarah/go-prod-change-registry/internal/service"
-	"github.com/sarah/go-prod-change-registry/web"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/service"
+	"github.com/sarahmaeve/go-prod-change-registry/web"
 )
 
 // DashboardHandler serves the server-rendered HTML dashboard.

@@ -296,5 +296,5 @@ Register `http://localhost:8080/auth/callback`, open `http://localhost:8080/logi
 With the default `PCR_REQUIRE_AUTH_READS=true`:
 
 - `/livez`, `/readyz`, `/api/v1/health`, `/login`, `/auth/start`, `/auth/callback`, and `/static/*` are public.
-- API reads and writes require a `Bearer` or `Token` credential, or the backwards-compatible API `token` query parameter. Dashboard routes require a provider-established human session.
-- Setting `PCR_REQUIRE_AUTH_READS=false` makes API `GET` and `HEAD` requests public; dashboard routes remain human-authenticated and API writes still require a token.
+- API reads and writes require a legacy `Bearer`/`Token` credential, the backwards-compatible API `token` query parameter, or a trusted identity established by Beyond. Dashboard routes require a provider-established human session.
+- Setting `PCR_REQUIRE_AUTH_READS=false` makes API `GET` and `HEAD` requests public; dashboard routes remain human-authenticated and API writes still require authentication.
