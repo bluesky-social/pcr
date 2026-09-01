@@ -105,6 +105,80 @@ Logout validates only the signed local session and CSRF token so a user whose
 group was revoked can still clear the unusable cookie; it does not make a
 provider call or terminate the upstream SSO session.
 
+## API and CLI authentication
+
+PCR keeps browser and API authority separate:
+
+| Client path | Credential and identity behavior |
+|---|---|
+| Dashboard | One configured GitHub, Google, Authentik, or Beyond identity creates a signed PCR session cookie. The cookie is valid only on dashboard routes. |
+| Direct API | A value from `PCR_API_TOKENS` is accepted as `Authorization: Bearer`, proxy-friendly `Authorization: Token`, or the backwards-compatible `?token=` query parameter. These opaque tokens do not identify a person: create, link, and close bodies supply `user_name`, while bodyless star/alert toggles use the generic actor `api`. |
+| Beyond-fronted API | Beyond validates an Authentik `<email>:<app-password>`, strips it, and supplies trusted identity headers. PCR rechecks policy and ignores a caller-supplied `user_name`. |
+| `pcr` CLI | Uses only the Beyond composite-credential path. It has no legacy-token, credential, header, or user-name flag. |
+
+With the default `PCR_REQUIRE_AUTH_READS=true`, API reads and writes require one
+of the API paths above. Setting it to `false` makes only API `GET` and `HEAD`
+requests public; writes and every dashboard route remain authenticated. Avoid
+the query-parameter token for new integrations because URLs are routinely
+logged.
+
+Direct GitHub, Google, and Authentik deployments still need
+`PCR_API_TOKENS`; those providers authenticate dashboard users, not API
+clients. Beyond deployments can omit legacy tokens. When using the checked-in
+Kubernetes Deployment, either retain an `api-tokens` key in the Secret (it may
+be empty in Beyond mode) or remove the corresponding `secretKeyRef` from the
+manifest.
+
+### Install and configure the CLI
+
+Build artifacts on an operator workstation or CI builder; the server container
+contains only `pcr-server`:
+
+```bash
+make build
+install -d "$HOME/.local/bin"
+install -m 0755 bin/pcr "$HOME/.local/bin/pcr"
+pcr version
+```
+
+Interactive users can create a versioned TOML file and enter the credential at
+a hidden prompt:
+
+```bash
+pcr config init
+pcr config set-credential
+pcr config show
+pcr --output=table config path
+pcr doctor
+```
+
+The file contains `version`, `url`, and optionally `credential`. Credential
+files are written atomically with mode `0600` on POSIX systems, and PCR refuses
+to use one readable by group or other users. The target must be an HTTPS
+origin; loopback HTTP requires `--allow-http`.
+
+CI should inject `PCR_CREDENTIAL` from a masked secret and normally set
+`PCR_URL`. Never put the composite in a command flag:
+
+```bash
+test -n "$PCR_CREDENTIAL"
+pcr doctor
+pcr events list --limit 1
+pcr events create \
+  --external-id "${BUILD_SYSTEM}-${BUILD_ID}" \
+  --type deployment \
+  --description "deployed ${SERVICE_NAME}" \
+  --tag env=prod
+```
+
+`PCR_CREDENTIAL` overrides the file credential. URL precedence is `--url`,
+`PCR_URL`, file, then `https://pcr.noclues.net`; config-path precedence is
+`--config`, `PCR_CONFIG`, then the platform default. The CLI defaults to JSON,
+also supports JSON Lines and tables, refuses redirects, bounds response bodies,
+and does not print credential material. Revoke the user-bound app password when
+the automation is retired; its mint purpose label is bookkeeping rather than a
+PCR-only scope.
+
 ## 1. Docker (single container)
 
 ### Prerequisites

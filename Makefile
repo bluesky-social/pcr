@@ -8,6 +8,7 @@ PCR_LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(SOURCE_COMM
 .PHONY: build clean test test-short coverage lint fmt run vet audit smoke smoke-docker seed-demo
 
 build:
+	mkdir -p bin
 	go build -o bin/pcr-server ./cmd/server
 	go build $(PCR_LDFLAGS) -o bin/pcr ./cmd/pcr
 

@@ -13,9 +13,10 @@ docker compose up -d --build
 
 Register `http://localhost:8080/auth/callback` on the selected provider first. The server starts on `:8080`; navigate to `http://localhost:8080/login` and sign in with the configured provider. Compose defaults to GitHub and unrestricted authenticated users for local development only.
 
-## Configuration
+## Server configuration
 
-All configuration is via environment variables prefixed with `PCR_`.
+The server is configured through environment variables prefixed with `PCR_`.
+The CLI has its own file and environment precedence described below.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -45,17 +46,23 @@ All configuration is via environment variables prefixed with `PCR_`.
 
 ## Command-line client
 
-Build the `pcr` client with release metadata:
+`pcr` is the automation-safe client for a Beyond-fronted PCR deployment. It
+uses the full Authentik `<email>:<app-password>` composite that Beyond accepts,
+then PCR derives event attribution from the identity verified at the edge. It
+does not accept a credential flag, a generic legacy API token, or a caller-set
+user name. Direct deployments using `PCR_API_TOKENS` should use the HTTP API
+instead.
+
+Build the server and client with release metadata:
 
 ```bash
 make build
 ./bin/pcr version
 ```
 
-The client writes JSON to stdout by default; diagnostics go to stderr. Use
-`--output=jsonl` for one event per line or `--output=table` for interactive
-display. Its safe initial command surface covers reads, access checks, and
-idempotent event creation:
+The client covers every read API, a non-mutating access check, and idempotent
+event creation. Toggle, link, and close mutations remain API-only because
+their retry behavior is not yet a safe CLI contract.
 
 ```bash
 pcr events list --type deployment --tag env=prod
@@ -66,14 +73,46 @@ pcr current --team payments --severity sev0 --severity sev1
 pcr doctor
 ```
 
-Run `pcr config init` to create the platform-default configuration file, then
-`pcr config set-credential` to read an Authentik
-`<email>:<app-password>` composite from a hidden terminal prompt. The file is
-written atomically with mode `0600`. `pcr config show` reports only whether a
-credential is configured; it never prints any part of the value.
+Run `pcr config init` to create the platform-default file, then
+`pcr config set-credential` to read the composite from a hidden terminal
+prompt. The file is written atomically with mode `0600` on POSIX systems; PCR
+refuses a credential-bearing file readable by group or other users.
+
+```bash
+pcr config init
+pcr config set-credential
+pcr config show
+pcr --output=table config path  # exact path without JSON framing
+pcr doctor
+```
+
+The versioned TOML schema is deliberately small:
+
+```toml
+version = 1
+url = "https://pcr.noclues.net"
+credential = "user@example.com:app-password"
+```
+
+Do not commit a real credential. `pcr config show` reports it only as
+`configured` or `missing`. Unknown keys, malformed origins, oversized files,
+unsupported versions, and malformed composite credentials fail closed.
+
+Effective settings use these precedence rules:
+
+| Setting | Precedence |
+|---|---|
+| Config path | `--config`, `PCR_CONFIG`, platform default |
+| PCR origin | `--url`, `PCR_URL`, config file, `https://pcr.noclues.net` |
+| Credential | `PCR_CREDENTIAL`, config file |
+
+Origins must be HTTPS. Local loopback HTTP additionally requires
+`--allow-http`. Requests have a finite timeout, refuse redirects, bound
+response bodies, and never include credentials in diagnostics.
 
 For CI, inject the user-bound credential through the build system's masked
-secret mechanism. Do not put it in command arguments:
+secret mechanism. Environment injection takes precedence over the interactive
+config file and keeps the secret out of process arguments:
 
 ```bash
 # PCR_CREDENTIAL is a masked secret. A mint purpose label is bookkeeping, not
@@ -89,14 +128,14 @@ unset PCR_CREDENTIAL
 ```
 
 Use a stable, unique external ID. A retry returns the original event rather
-than creating a duplicate, and PCR derives attribution from the identity
-Beyond verified for the credential. The target URL can be selected with
-`--url`, `PCR_URL`, or the config file, in that order. The credential can come
-from `PCR_CREDENTIAL` or the protected config file. Run `pcr config path` to
-print the effective platform path.
+than creating a duplicate. A mint purpose label is bookkeeping, not a
+PCR-specific authorization scope; revoke the app password when the automation
+no longer needs it.
 
-Toggle, link, and close mutations remain API-only until they have retry-safe
-desired-state semantics suitable for unattended automation.
+JSON is written to stdout by default and diagnostics to stderr. Use
+`--output=jsonl` for one event per line or `--output=table` for interactive
+display. Stable exit categories distinguish bad invocation (64), missing event
+(66), service failure (69), denied access (77), and bad configuration (78).
 
 ## API Reference
 
@@ -523,6 +562,8 @@ Events are immutable. There are no update or delete operations. The core `Change
 | `external_id` | string (optional) | Caller-supplied idempotency key (unique when non-null) |
 | `parent_id` | string (optional) | References another event's ID, making this a meta-event |
 | `user_name` | string | Who made the change |
+| `user_provider` | string (optional) | Identity provider that verified the actor, such as `github`, `google`, `authentik`, or `beyond`; empty for legacy token writes |
+| `user_subject` | string (optional) | Stable provider subject recorded with the event; Beyond currently uses normalized email |
 | `timestamp` | RFC 3339 | When the change happened |
 | `event_type` | string | Category: `deployment`, `feature-flag`, `k8s-change`, or custom. Meta-events use `star`, `unstar`, `alert`, `clear-alert`, `link` |
 | `description` | string | Short summary |
@@ -537,6 +578,7 @@ There are no mutable `timestamp_start`, `timestamp_end`, `starred`, `alerted`, o
 
 ```
 cmd/
+  pcr/             Automation-safe PCR CLI
   server/          HTTP server
   seed/            Fixture loader for a running server
   smoke/           End-to-end HTTP smoke client
@@ -549,6 +591,9 @@ internal/
   service/         Business logic
   handler/         HTTP handlers (API + dashboard)
   middleware/      Auth, request ID, logging
+  pcrcli/          Command model, execution, output, and exit mapping
+  pcrclient/       Typed, bounded authenticated HTTP client
+  pcrconfig/       Strict CLI configuration and precedence
   router/          Route definitions (chi)
 migrations/        SQL migration files
 web/               Embedded static assets and HTML templates
@@ -563,7 +608,7 @@ Four deployment options, from simplest to most production-like:
 
 | Method | Command | Best for |
 |---|---|---|
-| **Binary** | `make build` plus database, API-token, and OAuth environment | Local development |
+| **Binary** | `make build` plus the server's database and authentication environment | Local development |
 | **Docker** | `make docker-run` | Containerized local testing |
 | **Docker Compose** | Configure API and OAuth credentials, then `docker compose up -d --build` | Local dev with persistence |
 | **Kubernetes (kind)** | `kind create cluster`, then follow the provider-specific manifest steps | Testing k8s deployment |
@@ -626,7 +671,7 @@ Rotating the secret invalidates every existing session and CSRF token; users wil
 
 | Target | Description |
 |---|---|
-| `make build` | Compile to `bin/pcr-server` |
+| `make build` | Compile the server to `bin/pcr-server` and CLI to `bin/pcr` |
 | `make test` | Run default (non-integration) tests with race detection and package coverage |
 | `make test-short` | Run default tests with Go's short-test flag |
 | `make coverage` | Write `coverage.out` and `coverage.html`, then open the report |
@@ -661,6 +706,19 @@ API and human authentication are deliberately separate:
 1. **Beyond-fronted API clients:** Beyond validates an Authentik app password, strips the credential, and injects a verified identity that PCR rechecks before serving the API request.
 2. **Legacy or direct API clients:** `Authorization: Bearer <token>`, proxy-friendly `Authorization: Token <token>`, or the backwards-compatible `?token=` query parameter on `/api/v1/*`.
 3. **Dashboard users:** GitHub, Google, Authentik, or trusted Beyond identity, selected once at startup, followed by a locally signed PCR session cookie.
+
+The `pcr` CLI implements the first path only: it sends the complete Beyond
+credential as a Bearer value and never accepts it in argv. It intentionally
+does not accept arbitrary legacy tokens. Opaque legacy tokens identify an
+installation secret rather than a person, so direct API writes must supply
+`user_name` where the request schema accepts it; the bodyless star and alert
+toggle endpoints use the generic actor `api`. When Beyond establishes an
+identity, PCR ignores a supplied user name and uses the verified email instead.
+Dashboard session cookies are not accepted as API credentials.
+
+The `?token=` API query parameter remains for backwards compatibility, but new
+clients should use an Authorization header because URLs are commonly retained
+in logs and browser history.
 
 Legacy API tokens cannot log into the dashboard. When Beyond establishes an
 API identity, PCR ignores any `user_name` supplied by the client and records
@@ -697,4 +755,4 @@ Legacy tokens are configured through the `PCR_API_TOKENS` environment variable (
 - `/readyz` — PostgreSQL-backed readiness check
 - `/api/v1/health` — backwards-compatible readiness check
 - `/static/*` — CSS and static assets
-- `/login`, `/auth/start`, `/auth/callback` — human login endpoints
+- `/login`, `/auth/start`, `/auth/callback` — human login endpoints; in Beyond mode, `/auth/start` still requires an identity established by the trusted edge

@@ -1,6 +1,8 @@
 # Testing Guide
 
-The repository has unit tests, real-PostgreSQL integration tests, and an HTTP smoke-test client. The commands below reflect the current append-only API.
+The repository has unit and fuzz tests for the server and CLI,
+real-PostgreSQL integration tests, and an HTTP smoke-test client. The commands
+below reflect the current append-only API and separated browser/API auth model.
 
 ## Automated tests
 
@@ -40,11 +42,19 @@ PCR_TEST_POSTGRES_URL="$PCR_TEST_POSTGRES_URL" go test -race -tags=integration .
 
 This submits SQL-looking values as an authenticated, CSRF-protected browser form through the real router and PostgreSQL store, reads the unchanged values back through the API, and performs a second form write to prove the database remains operational. Client-side validation is intentionally bypassed so the test exercises the authoritative server boundary.
 
-Fuzz the repeated link form fields and link security validator:
+Fuzz the form, configuration, URL, path, and CLI parsing boundaries. Go runs
+one named fuzz target per invocation:
 
 ```bash
 go test -run='^$' -fuzz=FuzzParseLinkForm -fuzztime=10s ./internal/handler
 go test -run='^$' -fuzz=FuzzValidateLinks -fuzztime=10s ./internal/service
+go test -run='^$' -fuzz=FuzzBootstrapPath -fuzztime=10s ./internal/pcrconfig
+go test -run='^$' -fuzz=FuzzParseOrigin -fuzztime=10s ./internal/pcrconfig
+go test -run='^$' -fuzz=FuzzValidateCredential -fuzztime=10s ./internal/pcrconfig
+go test -run='^$' -fuzz=FuzzLoad -fuzztime=10s ./internal/pcrconfig
+go test -run='^$' -fuzz=FuzzEndpointPathSegment -fuzztime=10s ./internal/pcrclient
+go test -run='^$' -fuzz=FuzzSanitizeDiagnostic -fuzztime=10s ./internal/pcrcli
+go test -run='^$' -fuzz=FuzzCLIParser -fuzztime=10s ./internal/pcrcli
 ```
 
 To test an already-running server, including the Docker Compose service:
@@ -163,11 +173,65 @@ Promote only after the negative network test and the mismatched-identity test
 both fail closed. Record the image digest, Beyond configuration revision,
 NetworkPolicy, and observed audit-log entries used for acceptance.
 
-In another shell:
+## CLI acceptance through Beyond
+
+The `pcr` CLI authenticates only through Beyond's Authentik
+`<email>:<app-password>` credential path. It intentionally does not accept a
+legacy PCR token or a credential flag. Build it, inject a temporary credential
+without placing it in shell history, and exercise every read path:
+
+```bash
+make build
+export PCR_URL=https://changes.example.com
+printf 'Beyond credential (email:app-password): ' >&2
+IFS= read -r -s PCR_CREDENTIAL
+printf '\n' >&2
+export PCR_CREDENTIAL
+
+./bin/pcr version
+./bin/pcr config show
+./bin/pcr doctor
+./bin/pcr events list --limit 1
+./bin/pcr current --limit 1
+```
+
+Create one event with a unique stable external ID, retry the identical command,
+and verify both responses contain the same event ID:
+
+```bash
+EXTERNAL_ID="cli-acceptance-$(date -u +%Y%m%dT%H%M%SZ)"
+FIRST_ID=$(./bin/pcr events create \
+  --external-id "$EXTERNAL_ID" \
+  --type test \
+  --description "PCR CLI acceptance test" \
+  --tag purpose=cli-acceptance | jq -r .id)
+SECOND_ID=$(./bin/pcr events create \
+  --external-id "$EXTERNAL_ID" \
+  --type test \
+  --description "PCR CLI acceptance test" \
+  --tag purpose=cli-acceptance | jq -r .id)
+test "$FIRST_ID" = "$SECOND_ID"
+
+./bin/pcr events get "$FIRST_ID"
+./bin/pcr events annotations "$FIRST_ID"
+./bin/pcr events activity "$FIRST_ID"
+unset PCR_CREDENTIAL
+```
+
+The event is append-only and remains in PCR. Use a clearly test-specific type,
+description, and tags; revoke the temporary app password after acceptance.
+Inspect stdout, stderr, process listings, and CI logs to confirm the credential
+does not appear.
+
+## Direct API checks
+
+These remaining examples exercise direct legacy-token authentication and API
+mutations that the retry-safe CLI intentionally does not expose. In another
+shell:
 
 ```bash
 export PCR_TOKEN=test-token
-alias pcr='curl -sS -H "Authorization: Bearer $PCR_TOKEN" -H "Content-Type: application/json"'
+alias pcr-api='curl -sS -H "Authorization: Bearer $PCR_TOKEN" -H "Content-Type: application/json"'
 ```
 
 The unauthenticated liveness and readiness checks should return `{"status":"ok"}`:
@@ -182,7 +246,7 @@ curl -sS http://localhost:8080/readyz | jq
 Create a top-level incident event and retain its ID:
 
 ```bash
-EVENT_ID=$(pcr -X POST http://localhost:8080/api/v1/events -d '{
+EVENT_ID=$(pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "user_name": "on-call",
   "event_type": "incident",
   "description": "Investigating elevated error rate",
@@ -193,7 +257,7 @@ EVENT_ID=$(pcr -X POST http://localhost:8080/api/v1/events -d '{
 Open its alert state by appending an `alert` meta-event:
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events -d "{
+pcr-api -X POST http://localhost:8080/api/v1/events -d "{
   \"parent_id\": \"$EVENT_ID\",
   \"user_name\": \"on-call\",
   \"event_type\": \"alert\",
@@ -204,24 +268,24 @@ pcr -X POST http://localhost:8080/api/v1/events -d "{
 The derived state should now be alerted:
 
 ```bash
-pcr "http://localhost:8080/api/v1/events/$EVENT_ID/annotations" | jq
+pcr-api "http://localhost:8080/api/v1/events/$EVENT_ID/annotations" | jq
 # {"starred":false,"alerted":true}
 
-pcr "http://localhost:8080/api/v1/events?alerted=true&top_level=true" \
+pcr-api "http://localhost:8080/api/v1/events?alerted=true&top_level=true" \
   | jq --arg id "$EVENT_ID" '.events[] | select(.id == $id)'
 ```
 
 Close the state by appending a `clear-alert` meta-event:
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events -d "{
+pcr-api -X POST http://localhost:8080/api/v1/events -d "{
   \"parent_id\": \"$EVENT_ID\",
   \"user_name\": \"on-call\",
   \"event_type\": \"clear-alert\",
   \"description\": \"Incident resolved\"
 }" | jq
 
-pcr "http://localhost:8080/api/v1/events/$EVENT_ID/annotations" | jq
+pcr-api "http://localhost:8080/api/v1/events/$EVENT_ID/annotations" | jq
 # {"starred":false,"alerted":false}
 ```
 
@@ -232,7 +296,7 @@ Current annotation state follows meta-event creation order, not a caller-supplie
 Create a deployment start. This example uses the legacy `deploy_id`; new integrations should prefer `change_id`:
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "external_id": "manual-deploy-d-001-start",
   "user_name": "alice",
   "event_type": "deployment",
@@ -244,14 +308,14 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
 It appears in Current without a time bound:
 
 ```bash
-pcr "http://localhost:8080/api/v1/current?for_team=payments" \
+pcr-api "http://localhost:8080/api/v1/current?for_team=payments" \
   | jq '.events[] | select(.tags.deploy_id == "d-001")'
 ```
 
 Append the matching end event:
 
 ```bash
-pcr -X POST http://localhost:8080/api/v1/events -d '{
+pcr-api -X POST http://localhost:8080/api/v1/events -d '{
   "external_id": "manual-deploy-d-001-end",
   "user_name": "alice",
   "event_type": "deployment",
@@ -259,14 +323,14 @@ pcr -X POST http://localhost:8080/api/v1/events -d '{
   "tags": {"deploy_id": "d-001", "phase": "end", "env": "prod"}
 }' | jq
 
-pcr "http://localhost:8080/api/v1/events?tag=deploy_id:d-001" \
+pcr-api "http://localhost:8080/api/v1/events?tag=deploy_id:d-001" \
   | jq '.events[] | {timestamp, description, tags}'
 ```
 
 History still contains both immutable rows, while Current no longer includes `d-001`:
 
 ```bash
-pcr "http://localhost:8080/api/v1/current?for_team=payments" \
+pcr-api "http://localhost:8080/api/v1/current?for_team=payments" \
   | jq '.events[] | select(.tags.deploy_id == "d-001")'
 # no output
 ```
@@ -295,6 +359,8 @@ Register `http://localhost:8080/auth/callback`, open `http://localhost:8080/logi
 
 With the default `PCR_REQUIRE_AUTH_READS=true`:
 
-- `/livez`, `/readyz`, `/api/v1/health`, `/login`, `/auth/start`, `/auth/callback`, and `/static/*` are public.
+- `/livez`, `/readyz`, `/api/v1/health`, `/login`, `/auth/start`, `/auth/callback`, and `/static/*` are outside PCR's session middleware. In Beyond mode, `/auth/start` still requires identity headers from the trusted edge.
 - API reads and writes require a legacy `Bearer`/`Token` credential, the backwards-compatible API `token` query parameter, or a trusted identity established by Beyond. Dashboard routes require a provider-established human session.
 - Setting `PCR_REQUIRE_AUTH_READS=false` makes API `GET` and `HEAD` requests public; dashboard routes remain human-authenticated and API writes still require authentication.
+- Dashboard session cookies are not API credentials. The `pcr` CLI uses the Beyond credential path and does not accept legacy opaque tokens.
+- Avoid the `token` query parameter in new clients because URLs commonly appear in logs; use an Authorization header instead.
