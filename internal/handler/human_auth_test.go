@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/humanauth"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/handler"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
 )
 
 type fakeHumanAuthenticator struct {

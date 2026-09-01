@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
 )
 
 // validSessionSecret is a 32-byte test value that satisfies the minimum

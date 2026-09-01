@@ -18,16 +18,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
-	"github.com/sarah/go-prod-change-registry/internal/fixture"
-	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/humanauth"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	postgresdb "github.com/sarah/go-prod-change-registry/internal/postgres"
-	"github.com/sarah/go-prod-change-registry/internal/router"
-	"github.com/sarah/go-prod-change-registry/internal/service"
-	postgresstore "github.com/sarah/go-prod-change-registry/internal/store/postgres"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/fixture"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/handler"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
+	postgresdb "github.com/sarahmaeve/go-prod-change-registry/internal/postgres"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/router"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/service"
+	postgresstore "github.com/sarahmaeve/go-prod-change-registry/internal/store/postgres"
 )
 
 func TestSeededDashboardViews(t *testing.T) {

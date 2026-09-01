@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
 )
 
 var testOpts = middleware.SessionOptions{Secret: []byte("test-secret"), Secure: false}

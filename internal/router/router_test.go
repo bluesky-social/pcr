@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
-	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/humanauth"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	"github.com/sarah/go-prod-change-registry/internal/router"
-	"github.com/sarah/go-prod-change-registry/internal/service"
-	"github.com/sarah/go-prod-change-registry/internal/store"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/handler"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/router"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/service"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/store"
 )
 
 // mockStore implements store.ChangeStore with configurable function fields.

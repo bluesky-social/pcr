@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // ErrNotFound is returned when a requested entity does not exist.

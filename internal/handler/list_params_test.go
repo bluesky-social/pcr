@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // White-box tests for the query-parameter parser introduced alongside the

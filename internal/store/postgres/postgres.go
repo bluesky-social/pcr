@@ -15,8 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
-	"github.com/sarah/go-prod-change-registry/internal/store"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/store"
 )
 
 // Compile-time interface check.

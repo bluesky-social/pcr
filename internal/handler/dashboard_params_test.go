@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // White-box tests for the dashboard query-parameter parser and the

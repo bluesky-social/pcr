@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/humanauth"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
-	"github.com/sarah/go-prod-change-registry/web"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/web"
 )
 
 const (

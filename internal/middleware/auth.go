@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sarah/go-prod-change-registry/internal/humanauth"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/humanauth"
 )
 
 type apiPrincipalContextKey struct{}

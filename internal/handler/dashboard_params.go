@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // customRangeLayout is the datetime-local form input format used by the

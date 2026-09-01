@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 const defaultBaseURL = "https://pcr.noclues.net"

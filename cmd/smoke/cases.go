@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // testCase is a single named smoke check. Run gets a context-aware client

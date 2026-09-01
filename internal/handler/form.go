@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/sarah/go-prod-change-registry/internal/model"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/model"
 )
 
 // maxFormBytes bounds the dashboard's short action and authentication forms.

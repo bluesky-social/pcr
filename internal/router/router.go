@@ -7,10 +7,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
-	"github.com/sarah/go-prod-change-registry/internal/config"
-	"github.com/sarah/go-prod-change-registry/internal/handler"
-	"github.com/sarah/go-prod-change-registry/internal/middleware"
-	"github.com/sarah/go-prod-change-registry/web"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/config"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/handler"
+	"github.com/sarahmaeve/go-prod-change-registry/internal/middleware"
+	"github.com/sarahmaeve/go-prod-change-registry/web"
 )
 
 // New creates and configures a chi.Mux with all application routes and middleware.
