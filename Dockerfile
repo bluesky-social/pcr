@@ -1,11 +1,17 @@
-# Build stage
-FROM golang:1.27-alpine AS builder
+# syntax=docker/dockerfile:1
+
+# Build on the host architecture and cross-compile the static Go binary. This
+# avoids running the Go toolchain under QEMU during multi-platform builds.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/pcr-server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o /bin/pcr-server ./cmd/server
 
 # Runtime stage
 FROM alpine:3.21
