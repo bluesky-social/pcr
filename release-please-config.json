@@ -4,6 +4,7 @@
     ".": {
       "release-type": "go",
       "component": "pcr",
+      "initial-version": "0.1.0",
       "include-component-in-tag": false,
       "tag-separator": "-",
       "bump-minor-pre-major": false,
