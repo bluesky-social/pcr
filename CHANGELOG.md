@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/bluesky-social/pcr/compare/v0.1.0...v0.1.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* release tagging and maintenance-window improvements ([7359756](https://github.com/bluesky-social/pcr/commit/735975672e77a06e8ed92433a7da64ddb7acc1a7))
+
 ## 0.1.0 (2026-09-02)
 
 
