@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/bluesky-social/pcr/compare/v0.1.1...v0.1.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* require explicit PCR deployment configuration ([7587041](https://github.com/bluesky-social/pcr/commit/7587041805612e7a3a775199b2edc600dc8fd1e9))
+
 ## [0.1.1](https://github.com/bluesky-social/pcr/compare/v0.1.0...v0.1.1) (2026-09-04)
 
 
