@@ -17,11 +17,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const (
-	// DefaultURL is the production PCR origin used when no override is set.
-	DefaultURL  = "https://pcr.noclues.net"
-	maxFileSize = 1 << 20
-)
+const maxFileSize = 1 << 20
 
 // ErrInvalid identifies invalid or unsafe user configuration.
 var ErrInvalid = errors.New("invalid PCR configuration")
@@ -33,8 +29,8 @@ type File struct {
 	Credential string `toml:"credential,omitempty"`
 }
 
-// Values are the effective settings after applying flag, environment, file,
-// and default precedence.
+// Values are the effective settings after applying flag, environment, and file
+// precedence. There is no built-in deployment origin.
 type Values struct {
 	Path             string
 	URL              string
@@ -190,9 +186,6 @@ func Resolve(opts ResolveOptions) (Values, error) {
 	case cfg.URL != "":
 		values.URL = cfg.URL
 		values.URLSource = "file"
-	default:
-		values.URL = DefaultURL
-		values.URLSource = "default"
 	}
 	origin, err := ParseOrigin(values.URL, opts.AllowHTTP)
 	if err != nil {
@@ -219,7 +212,10 @@ func Resolve(opts ResolveOptions) (Values, error) {
 
 // ParseOrigin validates and canonicalizes a PCR origin.
 func ParseOrigin(raw string, allowHTTP bool) (*url.URL, error) {
-	if raw == "" || strings.TrimSpace(raw) != raw {
+	if raw == "" {
+		return nil, fmt.Errorf("%w: PCR URL is required; set --url, PCR_URL, or url in the configuration file", ErrInvalid)
+	}
+	if strings.TrimSpace(raw) != raw {
 		return nil, fmt.Errorf("%w: PCR URL must be an HTTPS origin", ErrInvalid)
 	}
 	origin, err := url.Parse(raw)

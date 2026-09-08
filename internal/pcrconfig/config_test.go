@@ -184,12 +184,16 @@ func TestResolvePrecedence(t *testing.T) {
 	}
 
 	missing := filepath.Join(t.TempDir(), "missing.toml")
-	values, err := Resolve(ResolveOptions{Path: missing, Getenv: func(string) string { return "" }})
-	if err != nil {
-		t.Fatalf("Resolve(defaults) error = %v", err)
+	_, err := Resolve(ResolveOptions{Path: missing, Getenv: func(string) string { return "" }})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "PCR URL is required") {
+		t.Fatalf("Resolve(no URL) error = %v, want configuration guidance", err)
 	}
-	if values.URL != DefaultURL || values.URLSource != "default" || values.CredentialSource != "missing" {
-		t.Errorf("Resolve(defaults) = %+v", values)
+	values, err := Resolve(ResolveOptions{Path: missing, URL: "https://explicit.example.com", Getenv: func(string) string { return "" }})
+	if err != nil {
+		t.Fatalf("Resolve(explicit URL) error = %v", err)
+	}
+	if values.URL != "https://explicit.example.com" || values.URLSource != "flag" || values.CredentialSource != "missing" {
+		t.Errorf("Resolve(explicit URL) = %+v", values)
 	}
 }
 
