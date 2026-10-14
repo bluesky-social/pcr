@@ -37,6 +37,9 @@ func NewDashboardHandler(svc *service.ChangeService, refreshSec int, sessionSecr
 		"formatTime": func(t time.Time) string {
 			return t.UTC().Format("2006-01-02 15:04:05 UTC")
 		},
+		"timeAttribute": func(t time.Time) string {
+			return t.UTC().Format(time.RFC3339)
+		},
 		"formatTags": func(tags map[string]string) []string {
 			if len(tags) == 0 {
 				return []string{}

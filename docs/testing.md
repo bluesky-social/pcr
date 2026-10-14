@@ -350,6 +350,7 @@ Register `http://localhost:8080/auth/callback`, open `http://localhost:8080/logi
 7. An actively alerted event has alert styling and appears in the Alerts view if its parent event is within the selected time range.
 8. The detail page displays lifecycle and annotation state, aggregated links, and an oldest-first activity trail of child annotations and correlated closure events.
 9. The page refreshes at the configured `PCR_DASHBOARD_REFRESH_SEC` interval.
+10. Item timestamps in tables, the severity banner, event details, and activity use the browser's local timezone and locale, with a timezone label. Time comes first; the date is omitted for events on today's local calendar date and follows the time otherwise. Dates update within a minute of local midnight, or when returning to the tab. Hovering a timestamp shows its UTC value; with JavaScript disabled, UTC remains visible. Check dates near midnight and daylight-saving transitions using the browser's timezone override.
 
 ## Idempotency
 
