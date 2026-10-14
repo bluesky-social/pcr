@@ -145,7 +145,7 @@
             <a href="/events/{{.ID}}">{{.Description}}</a>
             <span class="banner-meta">
                 {{if tagValue .Tags "team"}}{{tagValue .Tags "team"}}{{else}}Unattributed{{end}}
-                · started {{formatTime .Timestamp}} · {{formatElapsed .Timestamp}}
+                · started <time datetime="{{timeAttribute .Timestamp}}" data-local-time title="{{formatTime .Timestamp}}">{{formatTime .Timestamp}}</time> · {{formatElapsed .Timestamp}}
             </span>
         </li>
         {{end}}
@@ -186,7 +186,7 @@
                     {{if .Alerted}}<span class="alert-icon" title="Alert">&#9888;</span>{{end}}
                 </td>
                 {{if or (eq $.Filters.View "current") (eq $.Filters.View "site")}}
-                <td><a href="/events/{{.ID}}">{{formatTime .Timestamp}}</a></td>
+                <td><a href="/events/{{.ID}}"><time datetime="{{timeAttribute .Timestamp}}" data-local-time title="{{formatTime .Timestamp}}">{{formatTime .Timestamp}}</time></a></td>
                 <td class="col-elapsed">{{formatElapsed .Timestamp}}</td>
                 <td class="col-team">{{if tagValue .Tags "team"}}{{tagValue .Tags "team"}}{{else}}<span class="unattributed">Unattributed</span>{{end}}</td>
                 <td class="col-scope">{{if eq (tagValue .Tags "scope") "site"}}<span class="badge badge-site">Site-wide</span>{{else}}{{tagValue .Tags "scope"}}{{end}}</td>
@@ -194,7 +194,7 @@
                 <td>{{.EventType}}</td>
                 <td><a href="/events/{{.ID}}">{{.Description}}</a>{{if .Links}} <span class="event-link-count">{{len .Links}} links</span>{{end}}</td>
                 {{else}}
-                <td><a href="/events/{{.ID}}">{{formatTime .Timestamp}}</a></td>
+                <td><a href="/events/{{.ID}}"><time datetime="{{timeAttribute .Timestamp}}" data-local-time title="{{formatTime .Timestamp}}">{{formatTime .Timestamp}}</time></a></td>
                 <td class="col-user">{{.UserName}}</td><td>{{.EventType}}</td><td><a href="/events/{{.ID}}">{{.Description}}</a>{{if .Links}} <span class="event-link-count">{{len .Links}} links</span>{{end}}</td>
                 <td class="col-tags">{{range $k, $v := .Tags}}<a href="{{dashboardTagFilterURL $.Filters $k $v}}" class="badge badge-link">{{$k}}={{$v}}</a>{{end}}</td>
                 {{end}}

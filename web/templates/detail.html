@@ -23,7 +23,7 @@
         </dd>
 
         <dt>Timestamp</dt>
-        <dd>{{formatTime .Event.Timestamp}}</dd>
+        <dd><time datetime="{{timeAttribute .Event.Timestamp}}" data-local-time title="{{formatTime .Event.Timestamp}}">{{formatTime .Event.Timestamp}}</time></dd>
 
         {{if .Event.ParentID}}
         <dt>Parent Event</dt>
@@ -123,7 +123,7 @@
             {{range .Activity}}
             <li>
                 <div><span class="badge type-{{.EventType}}">{{.EventType}}</span> {{.Description}}</div>
-                <div class="activity-meta">{{.UserName}} · {{formatTime .Timestamp}}</div>
+                <div class="activity-meta">{{.UserName}} · <time datetime="{{timeAttribute .Timestamp}}" data-local-time title="{{formatTime .Timestamp}}">{{formatTime .Timestamp}}</time></div>
                 {{if .Links}}<ul class="event-links">{{range .Links}}<li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{if .Label}}{{.Label}}{{else}}{{.URL}}{{end}}</a></li>{{end}}</ul>{{end}}
             </li>
             {{end}}
