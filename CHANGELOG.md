@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/bluesky-social/pcr/compare/v0.1.3...v0.1.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* use 24-hour time for event timestamps ([9ae8377](https://github.com/bluesky-social/pcr/commit/9ae83778620410008388b9dcc0aa2931979245bf))
+
 ## [0.1.3](https://github.com/bluesky-social/pcr/compare/v0.1.2...v0.1.3) (2026-10-14)
 
 
