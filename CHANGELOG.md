@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/bluesky-social/pcr/compare/v0.1.2...v0.1.3) (2026-10-14)
+
+
+### Bug Fixes
+
+* display event timestamps in the viewer local time ([e89a2d4](https://github.com/bluesky-social/pcr/commit/e89a2d414f2ac606161897c51c7246affc30b99d))
+
 ## [0.1.2](https://github.com/bluesky-social/pcr/compare/v0.1.1...v0.1.2) (2026-09-08)
 
 
