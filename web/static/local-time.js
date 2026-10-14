@@ -3,6 +3,7 @@
 
     // Omitting timeZone uses the viewer's timezone, including daylight saving.
     var timeFormatter = new Intl.DateTimeFormat(undefined, {
+        hourCycle: "h23",
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
