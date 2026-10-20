@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/bluesky-social/pcr/compare/v0.1.4...v0.1.5) (2026-10-20)
+
+
+### Bug Fixes
+
+* build on Go 1.27.3 ([dd688ba](https://github.com/bluesky-social/pcr/commit/dd688ba7a0599ce8af4ac8ddf735a78bad2cdb89))
+
 ## [0.1.4](https://github.com/bluesky-social/pcr/compare/v0.1.3...v0.1.4) (2026-10-14)
 
 
