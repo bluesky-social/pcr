@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 )
@@ -25,12 +24,8 @@ const (
 	exitUsage = 64
 )
 
-// mainHelperEnv puts the re-executed test binary into entry-point mode, and
-// mainHelperArgsEnv carries the argv it should pass to main.
-const (
-	mainHelperEnv     = "PCR_TEST_RUN_MAIN"
-	mainHelperArgsEnv = "PCR_TEST_MAIN_ARGS"
-)
+// mainHelperEnv puts the re-executed test binary into entry-point mode.
+const mainHelperEnv = "PCR_TEST_RUN_MAIN"
 
 // TestMain re-executes this binary as the real command when the helper
 // variable is set, which is the only way to observe what main hands the OS:
@@ -39,11 +34,7 @@ func TestMain(m *testing.M) {
 	if os.Getenv(mainHelperEnv) != "1" {
 		os.Exit(m.Run())
 	}
-	args := []string{"pcr"}
-	if encoded := os.Getenv(mainHelperArgsEnv); encoded != "" {
-		args = append(args, strings.Split(encoded, "\x00")...)
-	}
-	os.Args = args
+	os.Args[0] = "pcr"
 	main()
 }
 
@@ -112,14 +103,14 @@ func TestMainPropagatesExitCode(t *testing.T) {
 		want int
 	}{
 		{name: "version", args: []string{"version"}, want: exitOK},
+		{name: "version with global option", args: []string{"--output", "json", "version"}, want: exitOK},
 		{name: "unknown flag", args: []string{"--no-such-flag"}, want: exitUsage},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			command := exec.CommandContext(t.Context(), binary)
+			command := exec.CommandContext(t.Context(), binary, test.args...) //nolint:gosec // G204: this test binary and the table-owned arguments are trusted.
 			command.Env = append(os.Environ(),
 				mainHelperEnv+"=1",
-				mainHelperArgsEnv+"="+strings.Join(test.args, "\x00"),
 				"PCR_CONFIG="+filepath.Join(t.TempDir(), "pcr.toml"),
 			)
 			output, err := command.CombinedOutput()

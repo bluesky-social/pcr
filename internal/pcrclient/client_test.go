@@ -59,6 +59,24 @@ func TestCreateDoesNotSendCallerIdentityOrLeakCredential(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptsIdempotentRetryResponse(t *testing.T) {
+	t.Parallel()
+	client := testClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return response(request, http.StatusOK, `{"id":"existing-event","external_id":"build-1","user_name":"alice","event_type":"deployment","description":"deployed"}`), nil
+	}), "person@example.com:password")
+	event, err := client.Create(t.Context(), CreateRequest{
+		ExternalID:  "build-1",
+		EventType:   "deployment",
+		Description: "deployed",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v, want idempotent retry success", err)
+	}
+	if event.ID != "existing-event" || event.ExternalID != "build-1" {
+		t.Errorf("Create() = %+v, want the existing event", event)
+	}
+}
+
 func TestListEncodesEveryFilter(t *testing.T) {
 	t.Parallel()
 	after := time.Date(2026, 8, 1, 2, 3, 4, 0, time.UTC)
