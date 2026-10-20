@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/bluesky-social/pcr/compare/v0.1.5...v0.1.6) (2026-10-20)
+
+
+### Bug Fixes
+
+* clear lint backlog and update vulnerable dependencies ([#8](https://github.com/bluesky-social/pcr/issues/8)) ([f6f2891](https://github.com/bluesky-social/pcr/commit/f6f28910ca032ce5391f96b0c4ab73dbdfe09a85))
+
 ## [0.1.5](https://github.com/bluesky-social/pcr/compare/v0.1.4...v0.1.5) (2026-10-20)
 
 
