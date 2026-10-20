@@ -1,4 +1,4 @@
-package pcrcli
+package pcrcli //nolint:testpackage // white-box tests cover unexported command wiring
 
 import (
 	"context"
