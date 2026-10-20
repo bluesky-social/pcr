@@ -1,4 +1,4 @@
-package pcrclient
+package pcrclient_test
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sarahmaeve/go-prod-change-registry/internal/pcrclient"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -35,7 +37,7 @@ func TestCreateDoesNotSendCallerIdentityOrLeakCredential(t *testing.T) {
 		return response(request, http.StatusCreated, `{"id":"event-1","external_id":"build-1","user_name":"person@example.com","event_type":"deployment","description":"deployed"}`), nil
 	}), credential)
 
-	event, err := client.Create(t.Context(), CreateRequest{
+	event, err := client.Create(t.Context(), pcrclient.CreateRequest{
 		ExternalID:  "build-1",
 		EventType:   "deployment",
 		Description: "deployed",
@@ -70,7 +72,7 @@ func TestListEncodesEveryFilter(t *testing.T) {
 		return response(request, http.StatusOK, `{"events":[],"total_count":0,"limit":10,"offset":20}`), nil
 	}), "person@example.com:password")
 
-	_, err := client.List(t.Context(), ListOptions{
+	_, err := client.List(t.Context(), pcrclient.ListOptions{
 		StartAfter:  &after,
 		StartBefore: &before,
 		Around:      &around,
@@ -116,7 +118,7 @@ func TestCurrentEncodesRepeatableFilters(t *testing.T) {
 		got = request.URL.Query()
 		return response(request, http.StatusOK, `{"events":[],"total_count":0,"limit":50,"offset":0}`), nil
 	}), "person@example.com:password")
-	_, err := client.Current(t.Context(), CurrentOptions{
+	_, err := client.Current(t.Context(), pcrclient.CurrentOptions{
 		Team:       "platform",
 		Scopes:     []string{"site", "system"},
 		Severities: []string{"sev0", "sev1"},
@@ -155,13 +157,13 @@ func TestResponseFailuresAreCategorizedAndBodyIsNeverExposed(t *testing.T) {
 	tests := []struct {
 		name   string
 		status int
-		kind   ErrorKind
+		kind   pcrclient.ErrorKind
 	}{
-		{name: "unauthorized", status: http.StatusUnauthorized, kind: ErrorPermission},
-		{name: "forbidden", status: http.StatusForbidden, kind: ErrorPermission},
-		{name: "not found", status: http.StatusNotFound, kind: ErrorNotFound},
-		{name: "bad request", status: http.StatusBadRequest, kind: ErrorRequest},
-		{name: "server", status: http.StatusInternalServerError, kind: ErrorUnavailable},
+		{name: "unauthorized", status: http.StatusUnauthorized, kind: pcrclient.ErrorPermission},
+		{name: "forbidden", status: http.StatusForbidden, kind: pcrclient.ErrorPermission},
+		{name: "not found", status: http.StatusNotFound, kind: pcrclient.ErrorNotFound},
+		{name: "bad request", status: http.StatusBadRequest, kind: pcrclient.ErrorRequest},
+		{name: "server", status: http.StatusInternalServerError, kind: pcrclient.ErrorUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -171,7 +173,7 @@ func TestResponseFailuresAreCategorizedAndBodyIsNeverExposed(t *testing.T) {
 				return response(request, test.status, sensitiveBody), nil
 			}), "person@example.com:password")
 			_, err := client.Get(t.Context(), "event-1")
-			var clientError *Error
+			var clientError *pcrclient.Error
 			if !errors.As(err, &clientError) || clientError.Kind != test.kind {
 				t.Fatalf("Get() error = %v, want kind %v", err, test.kind)
 			}
@@ -188,8 +190,8 @@ func TestStructuredAPIErrorIsActionable(t *testing.T) {
 	client := testClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return response(request, http.StatusBadRequest, `{"error":{"code":"validation_error","message":"maintenance events require phase=start and change_id"}}`), nil
 	}), "person@example.com:password")
-	_, err := client.Create(t.Context(), CreateRequest{EventType: "maintenance"})
-	var clientError *Error
+	_, err := client.Create(t.Context(), pcrclient.CreateRequest{EventType: "maintenance"})
+	var clientError *pcrclient.Error
 	if !errors.As(err, &clientError) {
 		t.Fatalf("Create() error = %v, want *Error", err)
 	}
@@ -210,7 +212,7 @@ func TestStructuredServerErrorIsOpaque(t *testing.T) {
 		return response(request, http.StatusInternalServerError, `{"error":{"code":"internal_error","message":"database connection string leaked"}}`), nil
 	}), "person@example.com:password")
 	_, err := client.Get(t.Context(), "event-1")
-	var clientError *Error
+	var clientError *pcrclient.Error
 	if !errors.As(err, &clientError) {
 		t.Fatalf("Get() error = %v, want *Error", err)
 	}
@@ -240,7 +242,7 @@ func TestMalformedAndOversizedResponses(t *testing.T) {
 	}{
 		{name: "malformed", body: "not JSON"},
 		{name: "multiple values", body: `{} {}`},
-		{name: "oversized", body: strings.Repeat("x", maxResponseSize+1)},
+		{name: "oversized", body: strings.Repeat("x", pcrclient.MaxResponseSize+1)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -249,8 +251,8 @@ func TestMalformedAndOversizedResponses(t *testing.T) {
 				return response(request, http.StatusOK, test.body), nil
 			}), "person@example.com:password")
 			_, err := client.Get(t.Context(), "event-1")
-			var clientError *Error
-			if !errors.As(err, &clientError) || clientError.Kind != ErrorUnavailable {
+			var clientError *pcrclient.Error
+			if !errors.As(err, &clientError) || clientError.Kind != pcrclient.ErrorUnavailable {
 				t.Fatalf("Get() error = %v, want unavailable", err)
 			}
 		})
@@ -263,11 +265,11 @@ func TestDefaultClientRejectsRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(): %v", err)
 	}
-	client, err := New(Options{Origin: origin, Credential: "person@example.com:password"})
+	client, err := pcrclient.New(pcrclient.Options{Origin: origin, Credential: "person@example.com:password"})
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
-	err = client.httpClient.CheckRedirect(&http.Request{}, []*http.Request{{}})
+	err = client.HTTPClient().CheckRedirect(&http.Request{}, []*http.Request{{}})
 	if !errors.Is(err, http.ErrUseLastResponse) {
 		t.Errorf("CheckRedirect() error = %v, want http.ErrUseLastResponse", err)
 	}
@@ -294,11 +296,11 @@ func FuzzEndpointPathSegment(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Parse(): %v", err)
 		}
-		client, err := New(Options{Origin: origin, Credential: "person@example.com:password", HTTPClient: &http.Client{}})
+		client, err := pcrclient.New(pcrclient.Options{Origin: origin, Credential: "person@example.com:password", HTTPClient: &http.Client{}})
 		if err != nil {
 			t.Fatalf("New(): %v", err)
 		}
-		endpoint := client.endpoint([]string{"api", "v1", "events", eventID}, nil)
+		endpoint := client.Endpoint([]string{"api", "v1", "events", eventID}, nil)
 		want := "/api/v1/events/" + url.PathEscape(eventID)
 		if endpoint.EscapedPath() != want {
 			t.Fatalf("endpoint escaped path = %q, want %q", endpoint.EscapedPath(), want)
@@ -306,13 +308,13 @@ func FuzzEndpointPathSegment(f *testing.F) {
 	})
 }
 
-func testClient(t *testing.T, transport http.RoundTripper, credential string) *Client {
+func testClient(t *testing.T, transport http.RoundTripper, credential string) *pcrclient.Client {
 	t.Helper()
 	origin, err := url.Parse("https://pcr.example.com")
 	if err != nil {
 		t.Fatalf("Parse(): %v", err)
 	}
-	client, err := New(Options{
+	client, err := pcrclient.New(pcrclient.Options{
 		Origin:     origin,
 		Credential: credential,
 		HTTPClient: &http.Client{Transport: transport},

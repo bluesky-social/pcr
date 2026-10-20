@@ -897,18 +897,7 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 	}
 
 	if len(params.Tags) > 0 {
-		tagClauses := make([]string, 0, len(params.Tags))
-		for k, v := range params.Tags {
-			keyParam := bind(&args, k)
-			valueParam := bind(&args, v)
-			tagClauses = append(tagClauses, "(key = "+keyParam+" AND value = "+valueParam+")")
-		}
-		subquery := fmt.Sprintf(
-			"id IN (SELECT event_id FROM change_event_tags WHERE %s GROUP BY event_id HAVING COUNT(DISTINCT key) = %s)",
-			strings.Join(tagClauses, " OR "),
-			bind(&args, len(params.Tags)),
-		)
-		clauses = append(clauses, subquery)
+		clauses = append(clauses, tagsSubquery(params.Tags, &args))
 	}
 
 	if len(clauses) == 0 {
@@ -916,6 +905,23 @@ func buildWhereClause(params model.ListParams) (string, []any) {
 	}
 
 	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// tagsSubquery matches events carrying every requested tag. It binds each key
+// and value through the caller's args slice, so the placeholders it emits stay
+// numbered in step with the arguments already bound by the surrounding clauses.
+func tagsSubquery(tags map[string]string, args *[]any) string {
+	tagClauses := make([]string, 0, len(tags))
+	for k, v := range tags {
+		keyParam := bind(args, k)
+		valueParam := bind(args, v)
+		tagClauses = append(tagClauses, "(key = "+keyParam+" AND value = "+valueParam+")")
+	}
+	return fmt.Sprintf(
+		"id IN (SELECT event_id FROM change_event_tags WHERE %s GROUP BY event_id HAVING COUNT(DISTINCT key) = %s)",
+		strings.Join(tagClauses, " OR "),
+		bind(args, len(tags)),
+	)
 }
 
 func buildCurrentWhereClause(params model.CurrentParams) (string, []any) {
