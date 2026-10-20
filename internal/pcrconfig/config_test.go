@@ -1,4 +1,4 @@
-package pcrconfig_test
+package pcrconfig //nolint:testpackage // white-box tests cover unexported path resolution and file installation
 
 import (
 	"errors"
@@ -7,8 +7,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/sarahmaeve/go-prod-change-registry/internal/pcrconfig"
 )
 
 func TestBootstrapPath(t *testing.T) {
@@ -31,14 +29,14 @@ func TestBootstrapPath(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			path, required, err := pcrconfig.BootstrapPath(test.args, func(name string) string {
+			path, required, err := BootstrapPath(test.args, func(name string) string {
 				if name == "PCR_CONFIG" {
 					return test.environment
 				}
 				return ""
 			})
 			if test.wantError {
-				if !errors.Is(err, pcrconfig.ErrInvalid) {
+				if !errors.Is(err, ErrInvalid) {
 					t.Fatalf("BootstrapPath() error = %v, want ErrInvalid", err)
 				}
 				return
@@ -79,9 +77,9 @@ func TestLoadStrictValidation(t *testing.T) {
 			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
 				t.Fatalf("WriteFile(): %v", err)
 			}
-			cfg, loaded, err := pcrconfig.Load(path, true)
+			cfg, loaded, err := Load(path, true)
 			if test.wantError != "" {
-				if !errors.Is(err, pcrconfig.ErrInvalid) || !strings.Contains(err.Error(), test.wantError) {
+				if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), test.wantError) {
 					t.Fatalf("Load() error = %v, want ErrInvalid containing %q", err, test.wantError)
 				}
 				return
@@ -99,18 +97,18 @@ func TestLoadStrictValidation(t *testing.T) {
 func TestLoadMissingAndBounded(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "missing.toml")
-	if _, loaded, err := pcrconfig.Load(path, false); err != nil || loaded {
+	if _, loaded, err := Load(path, false); err != nil || loaded {
 		t.Fatalf("Load(optional missing) loaded = %t, error = %v", loaded, err)
 	}
-	if _, _, err := pcrconfig.Load(path, true); !errors.Is(err, pcrconfig.ErrInvalid) {
+	if _, _, err := Load(path, true); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Load(required missing) error = %v, want ErrInvalid", err)
 	}
 
 	largePath := filepath.Join(t.TempDir(), "large.toml")
-	if err := os.WriteFile(largePath, []byte(strings.Repeat("x", pcrconfig.MaxFileSize+1)), 0o600); err != nil {
+	if err := os.WriteFile(largePath, []byte(strings.Repeat("x", maxFileSize+1)), 0o600); err != nil {
 		t.Fatalf("WriteFile(large): %v", err)
 	}
-	if _, _, err := pcrconfig.Load(largePath, true); !errors.Is(err, pcrconfig.ErrInvalid) || !strings.Contains(err.Error(), "exceeds 1 MiB") {
+	if _, _, err := Load(largePath, true); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "exceeds 1 MiB") {
 		t.Fatalf("Load(large) error = %v, want bounded-input error", err)
 	}
 }
@@ -126,8 +124,8 @@ func TestLoadRefusesUnsafeCredentialModeWithoutLeaking(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil { //nolint:gosec // G306: the group-readable mode is the fixture under test; Load must refuse it.
 		t.Fatalf("WriteFile(): %v", err)
 	}
-	_, _, err := pcrconfig.Load(path, true)
-	if !errors.Is(err, pcrconfig.ErrInvalid) || !strings.Contains(err.Error(), "chmod 600") {
+	_, _, err := Load(path, true)
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "chmod 600") {
 		t.Fatalf("Load() error = %v, want chmod guidance", err)
 	}
 	if strings.Contains(err.Error(), credential) || strings.Contains(err.Error(), "top-secret") {
@@ -160,7 +158,7 @@ func TestResolvePrecedence(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			values, err := pcrconfig.Resolve(pcrconfig.ResolveOptions{
+			values, err := Resolve(ResolveOptions{
 				Path:         path,
 				PathRequired: true,
 				URL:          test.flagURL,
@@ -188,11 +186,11 @@ func TestResolvePrecedence(t *testing.T) {
 	}
 
 	missing := filepath.Join(t.TempDir(), "missing.toml")
-	_, err := pcrconfig.Resolve(pcrconfig.ResolveOptions{Path: missing, Getenv: func(string) string { return "" }})
-	if !errors.Is(err, pcrconfig.ErrInvalid) || !strings.Contains(err.Error(), "PCR URL is required") {
+	_, err := Resolve(ResolveOptions{Path: missing, Getenv: func(string) string { return "" }})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "PCR URL is required") {
 		t.Fatalf("Resolve(no URL) error = %v, want configuration guidance", err)
 	}
-	values, err := pcrconfig.Resolve(pcrconfig.ResolveOptions{Path: missing, URL: "https://explicit.example.com", Getenv: func(string) string { return "" }})
+	values, err := Resolve(ResolveOptions{Path: missing, URL: "https://explicit.example.com", Getenv: func(string) string { return "" }})
 	if err != nil {
 		t.Fatalf("Resolve(explicit URL) error = %v", err)
 	}
@@ -224,9 +222,9 @@ func TestParseOrigin(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			origin, err := pcrconfig.ParseOrigin(test.raw, test.allowHTTP)
+			origin, err := ParseOrigin(test.raw, test.allowHTTP)
 			if test.want == "" {
-				if !errors.Is(err, pcrconfig.ErrInvalid) {
+				if !errors.Is(err, ErrInvalid) {
 					t.Fatalf("ParseOrigin(%q) error = %v, want ErrInvalid", test.raw, err)
 				}
 				return
@@ -244,19 +242,19 @@ func TestParseOrigin(t *testing.T) {
 func TestWriteAndReadCredential(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "nested", "config.toml")
-	cfg := pcrconfig.File{Version: 1, URL: "https://pcr.example.com"}
-	if err := pcrconfig.Write(path, cfg, false); err != nil {
+	cfg := File{Version: 1, URL: "https://pcr.example.com"}
+	if err := Write(path, cfg, false); err != nil {
 		t.Fatalf("Write(create): %v", err)
 	}
-	if err := pcrconfig.Write(path, cfg, false); !errors.Is(err, pcrconfig.ErrInvalid) || !strings.Contains(err.Error(), "already exists") {
+	if err := Write(path, cfg, false); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("Write(no replace) error = %v, want already exists", err)
 	}
-	credential, err := pcrconfig.ReadCredential(strings.NewReader("person@example.com:password\r\n"), &strings.Builder{})
+	credential, err := ReadCredential(strings.NewReader("person@example.com:password\r\n"), &strings.Builder{})
 	if err != nil {
 		t.Fatalf("ReadCredential() error = %v", err)
 	}
 	cfg.Credential = credential
-	if err := pcrconfig.Write(path, cfg, true); err != nil {
+	if err := Write(path, cfg, true); err != nil {
 		t.Fatalf("Write(replace): %v", err)
 	}
 	info, err := os.Stat(path)
@@ -266,7 +264,7 @@ func TestWriteAndReadCredential(t *testing.T) {
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Errorf("configuration mode = %04o, want 0600", info.Mode().Perm())
 	}
-	loaded, _, err := pcrconfig.Load(path, true)
+	loaded, _, err := Load(path, true)
 	if err != nil {
 		t.Fatalf("Load(): %v", err)
 	}
@@ -279,7 +277,7 @@ func FuzzBootstrapPath(f *testing.F) {
 	f.Add("--config=/tmp/config.toml", "")
 	f.Add("--config\x00bad", "/tmp/env.toml")
 	f.Fuzz(func(t *testing.T, arg, environment string) {
-		_, _, _ = pcrconfig.BootstrapPath([]string{arg}, func(string) string { return environment })
+		_, _, _ = BootstrapPath([]string{arg}, func(string) string { return environment })
 	})
 }
 
@@ -288,7 +286,7 @@ func FuzzParseOrigin(f *testing.F) {
 	f.Add("http://127.0.0.1:8080", true)
 	f.Add("https://example.com/\x1b[31m", false)
 	f.Fuzz(func(t *testing.T, raw string, allowHTTP bool) {
-		_, _ = pcrconfig.ParseOrigin(raw, allowHTTP)
+		_, _ = ParseOrigin(raw, allowHTTP)
 	})
 }
 
@@ -296,7 +294,7 @@ func FuzzValidateCredential(f *testing.F) {
 	f.Add("person@example.com:password")
 	f.Add("\x1b[31mnot-a-credential")
 	f.Fuzz(func(t *testing.T, credential string) {
-		err := pcrconfig.ValidateCredential(credential)
+		err := ValidateCredential(credential)
 		const safeError = "invalid PCR configuration: credential must be an email and app password separated by a colon"
 		if err != nil && err.Error() != safeError {
 			t.Fatalf("ValidateCredential() error = %q, want constant non-disclosing diagnostic", err)
@@ -308,13 +306,13 @@ func FuzzLoad(f *testing.F) {
 	f.Add([]byte("version = 1\nurl = \"https://pcr.example.com\"\n"))
 	f.Add([]byte("credential = \"secret@example.com:password\"\n\x00"))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		if len(data) > pcrconfig.MaxFileSize+1 {
-			data = data[:pcrconfig.MaxFileSize+1]
+		if len(data) > maxFileSize+1 {
+			data = data[:maxFileSize+1]
 		}
 		path := filepath.Join(t.TempDir(), "config.toml")
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatalf("WriteFile(): %v", err)
 		}
-		_, _, _ = pcrconfig.Load(path, true)
+		_, _, _ = Load(path, true)
 	})
 }

@@ -1,4 +1,4 @@
-package pcrcli_test
+package pcrcli //nolint:testpackage // white-box tests cover unexported command wiring
 
 import (
 	"context"
@@ -14,16 +14,15 @@ import (
 
 	"github.com/alecthomas/kong"
 
-	"github.com/sarahmaeve/go-prod-change-registry/internal/pcrcli"
 	"github.com/sarahmaeve/go-prod-change-registry/internal/pcrconfig"
 )
 
 func TestHelpUsesCompleteGroupedCommandTree(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr strings.Builder
-	code := pcrcli.Run(t.Context(), []string{"--help"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, pcrcli.BuildInfo{})
-	if code != pcrcli.ExitOK || stderr.Len() != 0 {
-		t.Fatalf("pcrcli.Run(--help) = %d, stderr = %q", code, stderr.String())
+	code := Run(t.Context(), []string{"--help"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, BuildInfo{})
+	if code != exitOK || stderr.Len() != 0 {
+		t.Fatalf("Run(--help) = %d, stderr = %q", code, stderr.String())
 	}
 	for _, want := range []string{
 		"Work commands",
@@ -57,12 +56,12 @@ func TestVersionAndConfigPathDoNotReadConfiguration(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			code := pcrcli.Run(t.Context(), test.args, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, pcrcli.BuildInfo{Version: "v1.2.3", Commit: "abc", Date: "today"})
-			if code != pcrcli.ExitOK || stderr.Len() != 0 {
-				t.Fatalf("pcrcli.Run(%v) = %d, stderr = %q", test.args, code, stderr.String())
+			code := Run(t.Context(), test.args, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, BuildInfo{Version: "v1.2.3", Commit: "abc", Date: "today"})
+			if code != exitOK || stderr.Len() != 0 {
+				t.Fatalf("Run(%v) = %d, stderr = %q", test.args, code, stderr.String())
 			}
 			if !strings.Contains(stdout.String(), test.want) {
-				t.Errorf("pcrcli.Run(%v) stdout = %q, want %q", test.args, stdout.String(), test.want)
+				t.Errorf("Run(%v) stdout = %q, want %q", test.args, stdout.String(), test.want)
 			}
 		})
 	}
@@ -76,12 +75,12 @@ func TestConfigLifecycleNeverPrintsCredential(t *testing.T) {
 		t.Helper()
 		var stdout, stderr strings.Builder
 		allArgs := append([]string{"--config", path}, args...)
-		code := pcrcli.Run(t.Context(), allArgs, emptyEnvironment, strings.NewReader(stdin), &stdout, &stderr, pcrcli.BuildInfo{})
+		code := Run(t.Context(), allArgs, emptyEnvironment, strings.NewReader(stdin), &stdout, &stderr, BuildInfo{})
 		return code, stdout.String(), stderr.String()
 	}
 
 	code, stdout, stderr := run([]string{"--url", "https://changes.example.com", "config", "init"}, "")
-	if code != pcrcli.ExitOK {
+	if code != exitOK {
 		t.Fatalf("config init = %d, stderr = %q", code, stderr)
 	}
 	if !strings.Contains(stdout, `"credential":"missing"`) {
@@ -89,7 +88,7 @@ func TestConfigLifecycleNeverPrintsCredential(t *testing.T) {
 	}
 
 	code, stdout, stderr = run([]string{"config", "set-credential"}, credential+"\n")
-	if code != pcrcli.ExitOK {
+	if code != exitOK {
 		t.Fatalf("config set-credential = %d, stderr = %q", code, stderr)
 	}
 	if strings.Contains(stdout+stderr, credential) || strings.Contains(stdout+stderr, "secret-app-password") {
@@ -97,7 +96,7 @@ func TestConfigLifecycleNeverPrintsCredential(t *testing.T) {
 	}
 
 	code, stdout, stderr = run([]string{"config", "show"}, "")
-	if code != pcrcli.ExitOK {
+	if code != exitOK {
 		t.Fatalf("config show = %d, stderr = %q", code, stderr)
 	}
 	if !strings.Contains(stdout, `"credential":"configured"`) || !strings.Contains(stdout, `"credential_source":"file"`) {
@@ -119,8 +118,8 @@ func TestConfigInitRequiresExplicitURL(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.toml")
 	var stdout, stderr strings.Builder
-	code := pcrcli.Run(t.Context(), []string{"--config", path, "config", "init"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, pcrcli.BuildInfo{})
-	if code != pcrcli.ExitConfig || !strings.Contains(stderr.String(), "PCR URL is required") {
+	code := Run(t.Context(), []string{"--config", path, "config", "init"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, BuildInfo{})
+	if code != exitConfig || !strings.Contains(stderr.String(), "PCR URL is required") {
 		t.Fatalf("config init without URL = %d, stderr = %q, want configuration guidance", code, stderr.String())
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -135,8 +134,8 @@ func TestConfigInitRequiresExplicitURL(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	code = pcrcli.Run(t.Context(), []string{"--config", path, "config", "init"}, getenv, strings.NewReader(""), &stdout, &stderr, pcrcli.BuildInfo{})
-	if code != pcrcli.ExitOK {
+	code = Run(t.Context(), []string{"--config", path, "config", "init"}, getenv, strings.NewReader(""), &stdout, &stderr, BuildInfo{})
+	if code != exitOK {
 		t.Fatalf("config init with PCR_URL = %d, stderr = %q", code, stderr.String())
 	}
 	cfg, _, err := pcrconfig.Load(path, true)
@@ -147,7 +146,7 @@ func TestConfigInitRequiresExplicitURL(t *testing.T) {
 
 func TestMissingURLPreventsHTTPRequests(t *testing.T) {
 	t.Parallel()
-	runtime := &pcrcli.Runtime{
+	runtime := &Runtime{
 		Context: t.Context(), ConfigPath: filepath.Join(t.TempDir(), "missing.toml"),
 		Getenv: func(key string) string {
 			if key == "PCR_CREDENTIAL" {
@@ -160,7 +159,7 @@ func TestMissingURLPreventsHTTPRequests(t *testing.T) {
 			return nil, errors.New("unexpected HTTP request")
 		})},
 	}
-	command := pcrcli.EventsCreateCommand{ExternalID: "build-1", Type: "deployment", Description: "Deploy service"}
+	command := EventsCreateCommand{ExternalID: "build-1", Type: "deployment", Description: "Deploy service"}
 	if err := command.Run(runtime); !errors.Is(err, pcrconfig.ErrInvalid) || !strings.Contains(err.Error(), "PCR URL is required") {
 		t.Fatalf("create without URL error = %v, want configuration guidance", err)
 	}
@@ -195,27 +194,27 @@ func TestEventsCreateEndToEnd(t *testing.T) {
 		return ""
 	}
 	var stdout, stderr strings.Builder
-	runtime := &pcrcli.Runtime{
+	runtime := &Runtime{
 		Context:    t.Context(),
 		Stdin:      strings.NewReader(""),
 		Stdout:     &stdout,
 		Stderr:     &stderr,
 		Getenv:     getenv,
-		Build:      pcrcli.BuildInfo{Version: "test"},
+		Build:      BuildInfo{Version: "test"},
 		ConfigPath: filepath.Join(t.TempDir(), "missing.toml"),
 		URL:        "https://pcr.example.com",
 		Timeout:    15,
 		Output:     "json",
 		HTTPClient: httpClient,
 	}
-	command := pcrcli.EventsCreateCommand{
+	command := EventsCreateCommand{
 		ExternalID:  "build-1",
 		Type:        "deployment",
 		Description: "deployed",
 		Tag:         []string{"env=prod"},
 	}
 	if err := command.Run(runtime); err != nil {
-		t.Fatalf("pcrcli.EventsCreateCommand.Run() error = %v", err)
+		t.Fatalf("EventsCreateCommand.Run() error = %v", err)
 	}
 	if _, ok := payload["user_name"]; ok {
 		t.Errorf("request payload contains user_name: %#v", payload)
@@ -238,9 +237,9 @@ func TestInputDiagnosticsAreSingleLineAndControlSafe(t *testing.T) {
 	t.Parallel()
 	malicious := "unknown\n\x1b[31m\tcommand"
 	var stdout, stderr strings.Builder
-	code := pcrcli.Run(context.Background(), []string{malicious}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, pcrcli.BuildInfo{})
-	if code != pcrcli.ExitUsage {
-		t.Fatalf("pcrcli.Run(malicious) = %d, want %d", code, pcrcli.ExitUsage)
+	code := Run(context.Background(), []string{malicious}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, BuildInfo{})
+	if code != exitUsage {
+		t.Fatalf("Run(malicious) = %d, want %d", code, exitUsage)
 	}
 	if containsControl(strings.TrimSuffix(stderr.String(), "\n")) {
 		t.Fatalf("stderr contains control characters: %q", stderr.String())
@@ -257,9 +256,9 @@ func TestCredentialCannotBePassedAsAFlagOrEchoed(t *testing.T) {
 	t.Parallel()
 	const credential = "person@example.com:do-not-echo"
 	var stdout, stderr strings.Builder
-	code := pcrcli.Run(t.Context(), []string{"--credential", credential, "version"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, pcrcli.BuildInfo{})
-	if code != pcrcli.ExitUsage {
-		t.Fatalf("pcrcli.Run(--credential) = %d, want %d", code, pcrcli.ExitUsage)
+	code := Run(t.Context(), []string{"--credential", credential, "version"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, BuildInfo{})
+	if code != exitUsage {
+		t.Fatalf("Run(--credential) = %d, want %d", code, exitUsage)
 	}
 	if strings.Contains(stdout.String()+stderr.String(), credential) || strings.Contains(stdout.String()+stderr.String(), "do-not-echo") {
 		t.Fatal("unsupported credential flag echoed credential value")
@@ -270,17 +269,17 @@ func TestMissingCredentialUsesConfigurationExitCode(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr strings.Builder
 	missing := filepath.Join(t.TempDir(), "missing.toml")
-	code := pcrcli.Run(t.Context(), []string{"--config", missing, "events", "get", "event-1"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, pcrcli.BuildInfo{})
-	if code != pcrcli.ExitConfig {
-		t.Fatalf("pcrcli.Run(missing credential) = %d, stderr = %q, want %d", code, stderr.String(), pcrcli.ExitConfig)
+	code := Run(t.Context(), []string{"--config", missing, "events", "get", "event-1"}, emptyEnvironment, strings.NewReader(""), &stdout, &stderr, BuildInfo{})
+	if code != exitConfig {
+		t.Fatalf("Run(missing credential) = %d, stderr = %q, want %d", code, stderr.String(), exitConfig)
 	}
 }
 
 func TestTableCellRemovesLayoutAndTerminalControls(t *testing.T) {
 	t.Parallel()
-	got := pcrcli.TableCell("first\tsecond\n\x1b[31m")
+	got := tableCell("first\tsecond\n\x1b[31m")
 	if containsControl(got) || strings.ContainsAny(got, "\t\n\r") {
-		t.Errorf("pcrcli.TableCell() = %q, want control-safe text", got)
+		t.Errorf("tableCell() = %q, want control-safe text", got)
 	}
 }
 
@@ -288,8 +287,8 @@ func FuzzSanitizeDiagnostic(f *testing.F) {
 	f.Add("ordinary error")
 	f.Add("line one\n\x1b[31mline two\t")
 	f.Fuzz(func(t *testing.T, input string) {
-		if containsControl(pcrcli.SanitizeDiagnostic(input)) {
-			t.Fatal("pcrcli.SanitizeDiagnostic() retained a control character")
+		if containsControl(sanitizeDiagnostic(input)) {
+			t.Fatal("sanitizeDiagnostic() retained a control character")
 		}
 	})
 }
@@ -299,13 +298,13 @@ func FuzzCLIParser(f *testing.F) {
 	f.Add("\x1b[31m\nunknown")
 	f.Add("--credential=secret")
 	f.Fuzz(func(t *testing.T, arg string) {
-		var cli pcrcli.CLI
-		parser, err := kong.New(&cli, pcrcli.KongOptions(pcrcli.BuildInfo{}, "/tmp/pcr-fuzz.toml", io.Discard, io.Discard, func(int) {})...)
+		var cli CLI
+		parser, err := kong.New(&cli, KongOptions(BuildInfo{}, "/tmp/pcr-fuzz.toml", io.Discard, io.Discard, func(int) {})...)
 		if err != nil {
 			t.Fatalf("kong.New(): %v", err)
 		}
 		_, parseErr := parser.Parse([]string{arg})
-		if parseErr != nil && containsControl(pcrcli.SanitizeDiagnostic(parseErr.Error())) {
+		if parseErr != nil && containsControl(sanitizeDiagnostic(parseErr.Error())) {
 			t.Fatal("sanitized parser error retained a control character")
 		}
 	})
