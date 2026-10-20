@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/bluesky-social/pcr/compare/v0.1.6...v0.1.7) (2026-10-20)
+
+
+### Bug Fixes
+
+* check migration state under PostgreSQL advisory lock ([#10](https://github.com/bluesky-social/pcr/issues/10)) ([ed1ff8b](https://github.com/bluesky-social/pcr/commit/ed1ff8bbcff78019253f0c1a83c37786111eccdc))
+
 ## [0.1.6](https://github.com/bluesky-social/pcr/compare/v0.1.5...v0.1.6) (2026-10-20)
 
 
