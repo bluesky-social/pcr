@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bluesky-social/pcr/compare/v0.1.7...v0.2.0) (2026-11-15)
+
+
+### Features
+
+* log in to RDS with IAM tokens ([#12](https://github.com/bluesky-social/pcr/issues/12)) ([0aab343](https://github.com/bluesky-social/pcr/commit/0aab3434be179a3c491efc4d2023adc36f5b9a37))
+
 ## [0.1.7](https://github.com/bluesky-social/pcr/compare/v0.1.6...v0.1.7) (2026-10-20)
 
 
