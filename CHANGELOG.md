@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/bluesky-social/pcr/compare/v0.2.0...v0.3.0) (2026-11-15)
+
+
+### Features
+
+* serve list_deployments over MCP ([288c8c3](https://github.com/bluesky-social/pcr/commit/288c8c3465bb3d93410f49411a83133390d0934b))
+
 ## [0.2.0](https://github.com/bluesky-social/pcr/compare/v0.1.7...v0.2.0) (2026-11-15)
 
 
